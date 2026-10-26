@@ -9,7 +9,7 @@ import { ChessBoard } from './components/ChessBoard';
 import { useMeshChess } from './hooks/useMeshChess';
 import { exportPgn } from './lib/chess';
 import { supportsBluetooth, supportsSerial } from './lib/transports';
-import type { Challenge, Color, Game, TransportKind } from './types';
+import type { Challenge, Color, Game, GameStatus, ResultEntry, TransportKind } from './types';
 
 type View = 'games' | 'lobby' | 'network';
 type SideTab = 'moves' | 'chat';
@@ -32,6 +32,18 @@ function resultLabel(game: Game) {
   if (game.status === 'resigned') return `${game.winner === 'w' ? 'White' : 'Black'} wins by resignation`;
   if (game.status === 'stalemate') return 'Draw by stalemate';
   return 'Game drawn';
+}
+
+function feedResultText(entry: ResultEntry) {
+  if (entry.outcome === 'draw') return `${entry.white} drew with ${entry.black}`;
+  return entry.outcome === 'white' ? `${entry.white} beat ${entry.black}` : `${entry.black} beat ${entry.white}`;
+}
+
+function feedResultReason(reason: GameStatus) {
+  if (reason === 'checkmate') return 'Checkmate';
+  if (reason === 'stalemate') return 'Stalemate';
+  if (reason === 'resigned') return 'Resignation';
+  return 'Draw agreed';
 }
 
 function App() {
@@ -214,7 +226,12 @@ function App() {
       <div className="lobby-grid"><section className="surface"><div className="section-heading"><h2><Inbox size={20} />Available challenges</h2><span>{activeChallenges.length} open</span></div>
         {ownChallenge && <div className="own-challenge"><span className="pulse-radio"><Radio size={20} /></span><div><strong>Your challenge is on the mesh</strong><p>Waiting for a player to accept · {ownChallenge.hostColor} pieces</p></div><button className="secondary-button" onClick={() => mesh.withdrawChallenge(ownChallenge.id)}>Withdraw</button></div>}
         <div className="challenge-list">{activeChallenges.map((challenge) => <ChallengeRow key={challenge.id} challenge={challenge} onAccept={() => { mesh.acceptChallenge(challenge); setView('games'); notify('Game accepted — good luck!'); }} />)}{!activeChallenges.length && !ownChallenge && <div className="large-empty"><span>♜</span><h3>The board is quiet</h3><p>No open challenges heard yet. Create one, or keep this page open while players join the mesh.</p><button className="primary-button" onClick={() => setNewGameOpen(true)}><Plus size={17} />Post a challenge</button></div>}</div>
-      </section><aside className="surface peers-card"><div className="section-heading"><h2><Signal size={20} />Heard on the mesh</h2><span>{onlinePeers.length}</span></div>{onlinePeers.map((peer) => <div className="peer-row" key={peer.id}><span className="mini-avatar">{peer.name[0].toUpperCase()}</span><div><strong>{peer.name}</strong><small>Last heard {timeAgo(peer.lastSeen)}</small></div><span className="status-dot" /></div>)}{!onlinePeers.length && <p className="muted-copy">No other players heard recently. In demo mode, open Cheshy Mess in a second tab to meet yourself on the mesh.</p>}</aside></div>
+      </section><aside className="surface peers-card"><div className="section-heading"><h2><Signal size={20} />Heard on the mesh</h2><span>{onlinePeers.length}</span></div>{onlinePeers.map((peer) => <div className="peer-row" key={peer.id}><span className="mini-avatar">{peer.name[0].toUpperCase()}</span><div><strong>{peer.name}</strong><small>Last heard {timeAgo(peer.lastSeen)}</small></div><span className="status-dot" /></div>)}{!onlinePeers.length && <p className="muted-copy">No other players heard recently. In demo mode, open Cheshy Mess in a second tab to meet yourself on the mesh.</p>}
+          <div className="results-block"><div className="section-heading"><h2><Trophy size={20} />Recent results</h2><span>{state.results.length}</span></div>
+            {state.results.map((entry) => <div className="result-row" key={entry.id}>{entry.outcome === 'draw' ? <Handshake size={16} className="result-icon" /> : <Trophy size={16} className="result-icon" />}<div><strong>{feedResultText(entry)}</strong><small>{feedResultReason(entry.reason)} · {timeAgo(entry.at)}</small></div></div>)}
+            {!state.results.length && <p className="muted-copy">Finished games on #chess will show up here.</p>}
+          </div>
+        </aside></div>
     </main>}
 
     {view === 'network' && <main className="page-content network-page">

@@ -13,6 +13,7 @@ A chess game you can play **anywhere** — even with no internet at all. It's **
 - ♟️ **Full chess rules** — castling, en passant, promotion, draws, resignation
 - ⏳ **Play at your own pace** — your games wait for you, forever
 - 💬 **Chat built in** — private chat with your opponent, plus a public channel for everyone
+- 🏆 **Recent results** — finished games are announced on the channel, so the lobby shows who beat who
 - 📡 **Play over the air** — send moves through a MeshCore LoRa radio instead of the internet (optional)
 - 📶 **Works offline** — install it once and it keeps working with no connection
 - 🔓 **No account, no server** — your games and profile never leave your device
@@ -59,6 +60,8 @@ You do **not** need this to play. To play with real people nearby — with **no 
 3. The game automatically sets up a public channel on your radio called **#chess**. Other players on that channel show up under **Heard on the mesh**.
 
 Moves and chat travel as tiny radio packets. If your radio disconnects, moves and messages **queue up and send when it reconnects** — the other player can be offline for days.
+
+When a game ends, a small result announcement is posted to **#chess** ("Alice beat Bob · checkmate"). Everyone on the channel sees recent results in the **Lobby**.
 
 > ℹ️ Radio connections do not work in Safari or on iPhone.
 

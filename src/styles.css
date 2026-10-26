@@ -18,3 +18,5 @@
 @media(max-width:900px){.game-panel.mobile-chat-open{display:flex;position:fixed;z-index:60;inset:62px 0 0 0;background:#1f1e1d}.game-panel.mobile-chat-open .mobile-chat-close{display:grid;position:absolute;right:12px;top:9px;z-index:2}.game-panel.mobile-chat-open .chat-messages{min-height:0}.game-panel.mobile-chat-open .chat-compose{margin-bottom:25px}}
 @media(max-width:650px){.game-panel.mobile-chat-open{inset:58px 0 62px 0}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;scroll-behavior:auto!important}}
+
+.results-block{border-top:1px solid var(--line);margin-top:6px}.result-row{display:flex;align-items:flex-start;gap:10px;padding:9px 16px}.result-row:last-of-type{padding-bottom:16px}.result-row .result-icon{color:var(--gold);margin-top:2px}.result-row strong{display:block;font-size:13px}.result-row small{color:var(--muted);font-size:11px}

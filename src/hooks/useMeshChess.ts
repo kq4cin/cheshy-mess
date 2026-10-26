@@ -18,6 +18,8 @@ import type {
   PersistedState,
   Player,
   RadioLog,
+  ResultEntry,
+  ResultPayload,
   SyncPayload,
   TransportKind,
   TransportState,
@@ -78,6 +80,17 @@ function packet(
 
 function opponent(game: Game, localId: string): Player {
   return game.white.id === localId ? game.black : game.white;
+}
+
+const ANNOUNCED_STATUSES = new Set<GameStatus>(['checkmate', 'stalemate', 'draw', 'resigned']);
+const MAX_RESULTS = 20;
+
+function validResultPayload(value: unknown): value is ResultPayload {
+  if (!isObject(value)) return false;
+  const payload = value as Partial<ResultPayload>;
+  return typeof payload.white === 'string' && typeof payload.black === 'string'
+    && (payload.outcome === 'white' || payload.outcome === 'black' || payload.outcome === 'draw')
+    && typeof payload.reason === 'string' && ANNOUNCED_STATUSES.has(payload.reason);
 }
 
 function localColor(game: Game, localId: string): Color {
@@ -185,6 +198,27 @@ export function useMeshChess(): MeshChessApi {
     void saved.catch((error: unknown) => addLog(`Storage: ${error instanceof Error ? error.message : String(error)}`));
     return next;
   }, [addLog, persist]);
+
+  const announceResult = useCallback((game: Game, status: GameStatus, winner: Color | undefined) => {
+    if (!ANNOUNCED_STATUSES.has(status)) return;
+    const outcome: ResultEntry['outcome'] = winner ? (winner === 'w' ? 'white' : 'black') : 'draw';
+    const payload: ResultPayload = { white: game.white.name, black: game.black.name, outcome, reason: status };
+    const outgoing = packet('result', stateRef.current.profile, payload, { gameId: game.id });
+    const entry: ResultEntry = {
+      id: outgoing.id,
+      gameId: game.id,
+      white: payload.white,
+      black: payload.black,
+      outcome,
+      reason: status,
+      at: Date.now(),
+    };
+    commit((latest) => ({
+      ...latest,
+      results: [entry, ...latest.results.filter((item) => item.gameId !== game.id)].slice(0, MAX_RESULTS),
+    }));
+    enqueueRef.current(outgoing, false);
+  }, [commit]);
 
   const flushOutbox = useCallback((): Promise<void> => {
     const run = flushTailRef.current.then(async () => {
@@ -529,6 +563,25 @@ export function useMeshChess(): MeshChessApi {
           updatedAt: Date.now(),
         })));
         sendAck(incoming);
+        announceResult(game, 'resigned', localColor(game, me.id));
+        break;
+      }
+      case 'result': {
+        if (incoming.to !== undefined || !incoming.gameId || !validResultPayload(incoming.payload)) break;
+        const payload = incoming.payload;
+        const entry: ResultEntry = {
+          id: incoming.id,
+          gameId: incoming.gameId,
+          white: payload.white.slice(0, 24),
+          black: payload.black.slice(0, 24),
+          outcome: payload.outcome,
+          reason: payload.reason,
+          at: incoming.sentAt,
+        };
+        commit((latest) => latest.results.some((item) => item.gameId === entry.gameId) ? latest : ({
+          ...latest,
+          results: [entry, ...latest.results].slice(0, MAX_RESULTS),
+        }));
         break;
       }
       case 'rematch': {
@@ -543,7 +596,7 @@ export function useMeshChess(): MeshChessApi {
         break;
       }
     }
-  }, [addLog, commit, sendAck, sendSync, sendSyncRequest]);
+  }, [addLog, announceResult, commit, sendAck, sendSync, sendSyncRequest]);
   receiveRef.current = receive;
 
   const disconnect = useCallback(async (): Promise<void> => {
@@ -741,11 +794,12 @@ export function useMeshChess(): MeshChessApi {
         updatedAt: Date.now(),
       })));
       enqueueRef.current(outgoing);
+      announceResult(game, result.status, result.winner);
       return true;
     } catch {
       return false;
     }
-  }, [commit]);
+  }, [announceResult, commit]);
 
   const resign = useCallback((gameId: string) => {
     const current = stateRef.current;
@@ -802,7 +856,8 @@ export function useMeshChess(): MeshChessApi {
       updatedAt: Date.now(),
     })));
     enqueueRef.current(outgoing);
-  }, [commit]);
+    if (response === 'accept') announceResult(game, 'draw', undefined);
+  }, [announceResult, commit]);
 
   const sendChat = useCallback((gameId: string | null, text: string) => {
     const clean = text.trim();

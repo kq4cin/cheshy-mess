@@ -39,6 +39,16 @@ describe('MeshChess wire protocol', () => {
     expect(validatePacket({ ...packet(), sentAt: Number.NaN })).toBe(false);
   });
 
+  it('round-trips result announcements', () => {
+    const original: Packet = {
+      ...packet(),
+      kind: 'result',
+      gameId: 'game-1',
+      payload: { white: 'Alice', black: 'Bob', outcome: 'white', reason: 'checkmate' },
+    };
+    expect(decodePacket(encodePacket(original))).toEqual(original);
+  });
+
   it('measures the packet limit in UTF-8 bytes', () => {
     const oversized = packet({ text: 'é'.repeat(MAX_PACKET_BYTES / 2) });
     expect(() => encodePacket(oversized)).toThrow(/UTF-8 bytes/);

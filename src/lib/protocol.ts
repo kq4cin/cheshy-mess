@@ -18,6 +18,7 @@ export const PACKET_KINDS: readonly PacketKind[] = [
   'draw',
   'resign',
   'rematch',
+  'result',
 ];
 
 const encoder = new TextEncoder();
