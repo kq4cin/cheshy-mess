@@ -1,5 +1,52 @@
 import { expect, test } from '@playwright/test';
 
+for (const droppedKind of ['move', 'ack'] as const) {
+  test(`state sync recovers a lost ${droppedKind} without leaving the move delivering`, async ({ context }) => {
+    await context.addInitScript(() => {
+      const postMessage = BroadcastChannel.prototype.postMessage;
+      BroadcastChannel.prototype.postMessage = function (message: unknown) {
+        const dropped = sessionStorage.getItem('drop-packet-kind');
+        if (dropped && typeof message === 'string' && message.startsWith('MC2:')) {
+          const packet = JSON.parse(message.slice(4)) as { K?: string };
+          if (packet.K === dropped) return;
+        }
+        postMessage.call(this, message);
+      };
+    });
+    const white = await context.newPage();
+    const black = await context.newPage();
+    await Promise.all([white.goto('/'), black.goto('/')]);
+    await Promise.all([white.waitForSelector('.welcome-board'), black.waitForSelector('.welcome-board')]);
+    await white.getByRole('button', { name: 'Start a new game' }).click();
+    await white.getByRole('button', { name: '♔ White' }).click();
+    await white.getByRole('button', { name: 'Post challenge to mesh' }).click();
+    await black.getByRole('button', { name: /^Lobby/ }).click();
+    await black.getByRole('button', { name: 'Accept', exact: false }).click();
+    await white.getByRole('button', { name: /^My games/ }).click();
+    await expect(black.getByText('Board synchronized')).toBeVisible();
+    await (droppedKind === 'move' ? white : black).evaluate((kind) => {
+      sessionStorage.setItem('drop-packet-kind', kind);
+    }, droppedKind);
+
+    await white.getByRole('button', { name: /^e2, white pawn/ }).click();
+    await white.getByRole('button', { name: /^e4, legal move/ }).click();
+    await expect(white.getByText('Delivering move')).toBeVisible();
+    if (droppedKind === 'ack') {
+      await expect(black.getByRole('button', { name: /^e4, white pawn, last move/ })).toBeVisible();
+    } else {
+      await expect(black.getByRole('button', { name: /^e2, white pawn/ })).toBeVisible();
+    }
+
+    await white.getByTitle('Request state sync').click();
+    await expect(black.getByRole('button', { name: /^e4, white pawn, last move/ })).toBeVisible();
+    await expect(white.getByText('Board synchronized')).toBeVisible();
+    await expect(white.getByText('Delivering move')).toHaveCount(0);
+    await black.getByRole('button', { name: /^e7, black pawn/ }).click();
+    await black.getByRole('button', { name: /^e5, legal move/ }).click();
+    await expect(white.getByRole('button', { name: /^e5, black pawn, last move/ })).toBeVisible();
+  });
+}
+
 test('two tabs exchange challenges, legal moves, acknowledgements and chat', async ({ context }) => {
   const white = await context.newPage();
   const black = await context.newPage();

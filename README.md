@@ -78,6 +78,7 @@ When a game ends, a small result announcement is posted to **#chess** ("Alice be
 | My radio won't connect | Use Chrome or Edge, and close other apps using the radio. Open **Mesh → Connection activity** to see what the radio reported |
 | No free channel slot on my radio | Free a slot in the MeshCore app, then reconnect |
 | I added #chess myself but the game can't find it | Add it as a **public hashtag channel** named `#chess` (not a private channel), so its key matches |
+| A game stays on "Delivering move" | Keep both players connected to the same transport, then click the sync button beside "Awaiting acknowledgement". Sync resends missing moves and confirms moves the opponent already received |
 | I want to start over | Clear the site's data in your browser settings |
 
 ---
