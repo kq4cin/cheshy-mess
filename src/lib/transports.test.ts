@@ -35,25 +35,51 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function clientHarness(secret = hashtagKey(GAME_CHANNEL)) {
+interface RadioSlot { name: string; secret: Uint8Array }
+
+const PUBLIC_SLOT: RadioSlot = { name: 'Public', secret: Uint8Array.from({ length: 16 }, (_, index) => index + 1) };
+const EMPTY_SLOT = (): RadioSlot => ({ name: '', secret: new Uint8Array(16) });
+
+// Mirrors MeshCore companion firmware: CMD_GET_CHANNEL strcpy()s the name into a reused output
+// buffer (bytes after the NUL are stale), and out-of-range slots answer ERR_CODE_NOT_FOUND.
+async function clientHarness(options: { slots?: RadioSlot[]; reportedChannels?: number } = {}) {
+  const gameSecret = await hashtagKey(GAME_CHANNEL);
+  const slots = options.slots ?? [PUBLIC_SLOT, { name: GAME_CHANNEL, secret: gameSecret }];
   const received: string[] = [];
   const writes: Uint8Array[] = [];
   const radioTexts: string[] = [];
-  const channelSecret = await secret;
+  const logs: string[] = [];
+  const outFrame = new Uint8Array(172).fill(0x58);
   let client: MeshCoreClient;
   client = new MeshCoreClient((frame) => {
     writes.push(frame.slice());
     let response: Uint8Array;
-    if (frame[0] === 0x16) response = Uint8Array.of(13, 3, 0, 2);
+    if (frame[0] === 0x16) response = Uint8Array.of(13, 3, 0, options.reportedChannels ?? slots.length);
     else if (frame[0] === 0x01) response = Uint8Array.of(5);
     else if (frame[0] === 0x1f) {
-      response = new Uint8Array(50);
-      response[0] = 18;
-      response[1] = frame[1];
-      response.set(new TextEncoder().encode(GAME_CHANNEL), 2);
-      response.set(channelSecret, 34);
-    } else if (frame[0] === 0x20) response = Uint8Array.of(0);
-    else if (frame[0] === 0x0a) response = Uint8Array.of(10);
+      const slot = slots[frame[1]];
+      if (!slot) response = Uint8Array.of(1, 2);
+      else {
+        outFrame[0] = 18;
+        outFrame[1] = frame[1];
+        const name = new TextEncoder().encode(slot.name);
+        outFrame.set(name, 2);
+        outFrame[2 + name.byteLength] = 0;
+        outFrame.set(slot.secret, 34);
+        response = outFrame.slice(0, 50);
+      }
+    } else if (frame[0] === 0x20) {
+      if (frame.byteLength < 50 || !slots[frame[1]]) response = Uint8Array.of(1, 2);
+      else {
+        const nameField = frame.subarray(2, 34);
+        const end = nameField.indexOf(0);
+        slots[frame[1]] = {
+          name: new TextDecoder().decode(end < 0 ? nameField : nameField.subarray(0, end)),
+          secret: frame.slice(34, 50),
+        };
+        response = Uint8Array.of(0);
+      }
+    } else if (frame[0] === 0x0a) response = Uint8Array.of(10);
     else if (frame[0] === 0x03) {
       radioTexts.push(new TextDecoder().decode(frame.subarray(7)));
       response = Uint8Array.of(6);
@@ -61,14 +87,14 @@ async function clientHarness(secret = hashtagKey(GAME_CHANNEL)) {
     queueMicrotask(() => client.handleFrame(response));
   }, {
     onMessage: (text) => received.push(text),
+    onLog: (text) => logs.push(text),
   }, {
-    maxChannels: 2,
     fragmentDelayMs: 0,
     syncIntervalMs: 60_000,
   });
   clients.push(client);
   await client.start();
-  return { client, received, writes, radioTexts };
+  return { client, received, writes, radioTexts, logs, slots };
 }
 
 describe('SerialFrameParser', () => {
@@ -175,6 +201,46 @@ describe('MeshCore text fragmentation', () => {
   });
 
   it('does not accept a matching channel name with the wrong secret', async () => {
-    await expect(clientHarness(Promise.resolve(new Uint8Array(16)))).rejects.toThrow(/No free MeshCore channel slot/);
+    await expect(clientHarness({ slots: [PUBLIC_SLOT, { name: GAME_CHANNEL, secret: new Uint8Array(16).fill(7) }] }))
+      .rejects.toThrow(/No free MeshCore channel slot/);
+  });
+});
+
+describe('MeshCore channel setup', () => {
+  it('finds a manually created hashtag channel despite stale bytes after the name', async () => {
+    const secret = await hashtagKey(GAME_CHANNEL);
+    const { client, writes } = await clientHarness({ slots: [PUBLIC_SLOT, EMPTY_SLOT(), { name: GAME_CHANNEL, secret }] });
+    expect(client.channelIndex).toBe(2);
+    expect(writes.some((frame) => frame[0] === 0x20)).toBe(false);
+  });
+
+  it('matches on the hashtag key even when the app stored a different name', async () => {
+    const secret = await hashtagKey(GAME_CHANNEL);
+    const { client } = await clientHarness({ slots: [PUBLIC_SLOT, { name: 'chess', secret }] });
+    expect(client.channelIndex).toBe(1);
+  });
+
+  it('creates the channel in the first empty non-public slot', async () => {
+    const secret = await hashtagKey(GAME_CHANNEL);
+    const busy = { name: 'Friends', secret: new Uint8Array(16).fill(9) };
+    const { client, writes, slots, logs } = await clientHarness({ slots: [PUBLIC_SLOT, busy, EMPTY_SLOT(), EMPTY_SLOT()] });
+    expect(client.channelIndex).toBe(2);
+    const set = writes.find((frame) => frame[0] === 0x20);
+    expect(set?.byteLength).toBe(50);
+    expect(set?.[1]).toBe(2);
+    expect(slots[2].name).toBe(GAME_CHANNEL);
+    expect(Array.from(slots[2].secret)).toEqual(Array.from(secret));
+    expect(logs.some((line) => line.includes('Created public channel #chess in slot 2'))).toBe(true);
+  });
+
+  it('stops scanning at ERR_CODE_NOT_FOUND when the reported slot count is too high', async () => {
+    const { client } = await clientHarness({ slots: [PUBLIC_SLOT, EMPTY_SLOT()], reportedChannels: 40 });
+    expect(client.channelIndex).toBe(1);
+  });
+
+  it('explains how to recover when every slot is in use', async () => {
+    const busy = (fill: number) => ({ name: `ch${fill}`, secret: new Uint8Array(16).fill(fill) });
+    await expect(clientHarness({ slots: [PUBLIC_SLOT, busy(2), busy(3)] }))
+      .rejects.toThrow(/remove a channel in the MeshCore app/);
   });
 });

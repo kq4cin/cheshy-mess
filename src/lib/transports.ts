@@ -147,6 +147,12 @@ function decodeText(bytes: Uint8Array): string {
   return textDecoder.decode(bytes).replace(/\0+$/u, '');
 }
 
+// Firmware strcpy()s names into a reused buffer, so bytes after the first NUL are stale garbage.
+function decodeCString(bytes: Uint8Array): string {
+  const end = bytes.indexOf(0);
+  return textDecoder.decode(end < 0 ? bytes : bytes.subarray(0, end));
+}
+
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -245,7 +251,8 @@ export class MeshCoreClient {
     this.running = true;
     try {
       const device = await this.request(Uint8Array.of(0x16, 0x03), CompanionCode.DEVICE_INFO);
-      if (device[3] > 0) this.maxChannels = device[3];
+      if (device.byteLength > 3 && device[1] >= 3 && device[3] > 0) this.maxChannels = Math.min(device[3], 64);
+      this.callbacks.onLog?.(`Companion firmware code v${device[1] ?? '?'}, ${this.maxChannels} channel slots`);
       const appName = textEncoder.encode(this.options.appName ?? 'Cheshy Mess');
       const appStart = new Uint8Array(8 + appName.byteLength);
       appStart[0] = 0x01;
@@ -256,7 +263,8 @@ export class MeshCoreClient {
       this.syncTimer = setInterval(() => {
         void this.syncNow().catch((error: unknown) => this.reportError(error));
       }, this.options.syncIntervalMs ?? 90_000);
-      await this.syncNow();
+      // Draining queued messages is best-effort; a slow first sync must not abort a working connection.
+      await this.syncNow().catch((error: unknown) => this.reportError(error));
     } catch (error) {
       this.stop();
       throw error;
@@ -397,23 +405,47 @@ export class MeshCoreClient {
     const nameBytes = textEncoder.encode(name);
     if (nameBytes.byteLength > 32) throw new Error('MeshCore channel name exceeds 32 UTF-8 bytes');
     const secret = await hashtagKey(name);
-    let free: number | null = null;
-    for (let index = 1; index < this.maxChannels; index += 1) {
-      const response = await this.request(Uint8Array.of(0x1f, index), CompanionCode.CHANNEL_INFO);
-      if (response.byteLength < 50 || response[1] !== index) throw new Error('Invalid MeshCore channel response');
-      const channelName = decodeText(response.subarray(2, 34));
-      if (channelName === name && equalBytes(response.subarray(34, 50), secret)) return index;
-      if (free === null && channelName.length === 0) free = index;
+    const slots: { index: number; name: string; secret: Uint8Array }[] = [];
+    for (let index = 0; index < this.maxChannels; index += 1) {
+      let response: Uint8Array;
+      try {
+        response = await this.request(Uint8Array.of(0x1f, index), CompanionCode.CHANNEL_INFO, 2_500);
+      } catch {
+        break; // ERR_CODE_NOT_FOUND (or no reply) marks the end of the radio's channel table
+      }
+      if (response.byteLength < 50) break;
+      slots.push({ index: response[1], name: decodeCString(response.subarray(2, 34)), secret: response.slice(34, 50) });
     }
-    if (free === null) throw new Error(`No free MeshCore channel slot for ${name}`);
+    if (!slots.length) throw new Error('Radio did not report any channels (companion firmware too old?)');
+    const named = slots.filter((slot) => slot.name || slot.secret.some((byte) => byte !== 0));
+    this.callbacks.onLog?.(`Radio channels: ${named.map((slot) => `${slot.index}:${slot.name || '(unnamed)'}`).join(', ') || 'none'}`);
+
+    // Match on the secret like Mesh Wars: the key is what makes traffic interoperable, names are cosmetic.
+    const found = slots.find((slot) => equalBytes(slot.secret, secret));
+    if (found) {
+      this.callbacks.onLog?.(`Game channel ${name} found in slot ${found.index}`);
+      return found.index;
+    }
+    const lookalike = named.find((slot) => slot.name.replace(/^#+/, '').toLowerCase() === name.replace(/^#+/, '').toLowerCase());
+    if (lookalike) {
+      this.callbacks.onLog?.(`Slot ${lookalike.index} is named ${lookalike.name} but uses a different key; ${name} must be added as a public hashtag channel`);
+    }
+
+    const free = slots.find((slot) => slot.index !== 0 && !slot.name && slot.secret.every((byte) => byte === 0));
+    if (!free) throw new Error(`No free MeshCore channel slot for ${name} - remove a channel in the MeshCore app, then reconnect`);
 
     const command = new Uint8Array(50);
     command[0] = 0x20;
-    command[1] = free;
-    command.set(nameBytes, 2);
+    command[1] = free.index;
+    command.set(nameBytes.subarray(0, 31), 2);
     command.set(secret, 34);
-    await this.request(command, CompanionCode.OK);
-    return free;
+    try {
+      await this.request(command, CompanionCode.OK);
+    } catch (error) {
+      throw new Error(`Radio refused to create ${name} in slot ${free.index}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.callbacks.onLog?.(`Created public channel ${name} in slot ${free.index}`);
+    return free.index;
   }
 
   async sendChannel(text: string, at = Date.now()): Promise<void> {
@@ -562,18 +594,36 @@ export class SerialAdapter implements Transport {
   }
 
   private async readLoop(parser: SerialFrameParser): Promise<void> {
-    try {
-      while (this.reader && !this.disconnecting) {
-        const { done, value } = await this.reader.read();
-        if (done) break;
-        if (value) for (const frame of parser.push(value)) this.client?.handleFrame(frame);
+    while (!this.disconnecting && this.reader) {
+      const reader = this.reader;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) for (const frame of parser.push(value)) this.client?.handleFrame(frame);
+        }
+      } catch (error) {
+        if (!this.disconnecting) this.callbacks.onLog?.(`Serial read error: ${error instanceof Error ? error.message : String(error)}`);
       }
-    } catch (error) {
-      if (!this.disconnecting) this.emit('error', error instanceof Error ? error.message : String(error));
+      if (this.disconnecting) return;
+      // Recoverable errors (e.g. buffer overrun) leave the port open with a fresh readable stream.
+      try {
+        reader.releaseLock();
+      } catch {}
+      this.reader = null;
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      if (this.disconnecting || !this.port?.readable) break;
+      parser.reset();
+      this.reader = this.port.readable.getReader();
+    }
+    if (!this.disconnecting) {
+      this.client?.stop();
+      this.emit('offline', 'Serial radio disconnected');
     }
   }
 
   private async close(): Promise<void> {
+    this.disconnecting = true;
     this.client?.stop();
     this.client = null;
     const reader = this.reader;
@@ -643,7 +693,7 @@ export class BLEAdapter implements Transport {
   private readonly notificationListener = (event: Event): void => {
     const characteristic = event.target as unknown as BluetoothCharacteristicLike;
     const value = characteristic.value;
-    if (value) this.client?.handleFrame(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    if (value) this.client?.handleFrame(new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)));
   };
   private readonly disconnectListener = (): void => {
     this.client?.stop();
@@ -660,7 +710,7 @@ export class BLEAdapter implements Transport {
     try {
       const bluetooth = (globalThis.navigator as Navigator & { bluetooth?: BluetoothNavigator } | undefined)?.bluetooth;
       this.device = device ?? await bluetooth?.requestDevice({
-        filters: [{ services: [NORDIC_UART_SERVICE] }],
+        filters: [{ services: [NORDIC_UART_SERVICE] }, { namePrefix: 'MeshCore' }],
         optionalServices: [NORDIC_UART_SERVICE],
       }) ?? null;
       if (!this.device?.gatt) throw new Error('Web Bluetooth is unavailable');
