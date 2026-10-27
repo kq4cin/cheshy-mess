@@ -1,4 +1,4 @@
-const CACHE = 'meshchess-v1';
+const CACHE = 'meshchess-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png'];
 
 self.addEventListener('install', (event) => {
