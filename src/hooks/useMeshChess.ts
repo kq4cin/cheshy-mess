@@ -11,7 +11,6 @@ import type {
   Game,
   GameStatus,
   MovePayload,
-  MoveRecord,
   OutboxItem,
   Packet,
   PacketKind,
@@ -345,6 +344,10 @@ export function useMeshChess(): MeshChessApi {
 
   const sendAck = useCallback((incoming: Packet) => {
     if (!RELIABLE_KINDS.has(incoming.kind)) return;
+    commit((latest) => latest.seen.includes(incoming.id) ? latest : ({
+      ...latest,
+      seen: [...latest.seen, incoming.id].slice(-2000),
+    }));
     const game = incoming.gameId
       ? stateRef.current.games.find((candidate) => candidate.id === incoming.gameId)
       : undefined;
@@ -357,7 +360,7 @@ export function useMeshChess(): MeshChessApi {
       to: incoming.from.id,
       ...(incoming.gameId ? { gameId: incoming.gameId } : {}),
     }), false);
-  }, []);
+  }, [commit]);
 
   const sendSyncRequest = useCallback((gameId: string, to: string) => {
     enqueueRef.current(packet('sync-request', stateRef.current.profile, {}, { gameId, to }), false);
@@ -398,7 +401,10 @@ export function useMeshChess(): MeshChessApi {
       sendAck(incoming);
       return;
     }
-    commit((latest) => ({ ...latest, seen: [...latest.seen, incoming.id].slice(-2000) }));
+    // Reliable packets are only deduplicated after validation and application, when we ACK them.
+    if (!RELIABLE_KINDS.has(incoming.kind)) {
+      commit((latest) => ({ ...latest, seen: [...latest.seen, incoming.id].slice(-2000) }));
+    }
 
     const upsertPeer = () => commit((latest) => ({
       ...latest,
@@ -513,14 +519,32 @@ export function useMeshChess(): MeshChessApi {
         if (!isObject(incoming.payload) || typeof incoming.payload.packetId !== 'string') break;
         const ack = incoming.payload as Partial<AckPayload>;
         const ackId = ack.packetId;
-        commit((latest) => ({
-          ...latest,
-          outbox: latest.outbox.filter((item) => item.packetId !== ackId && item.ackId !== ackId),
-          games: latest.games.map((game) => game.awaitingAck === ackId ? { ...game, awaitingAck: null } : game),
-          chats: latest.chats.map((chat) => chat.id === ackId && chat.mine
-            ? { ...chat, delivery: 'acked' as const }
-            : chat),
-        }));
+        commit((latest) => {
+          const acknowledged = latest.outbox.find((item) => item.packetId === ackId);
+          if (!acknowledged) return latest;
+          const recipient = outboxRecipient(acknowledged.wire);
+          if (recipient !== undefined && recipient !== incoming.from.id) return latest;
+          const delivered = new Set([acknowledged.packetId]);
+          if (acknowledged.kind === 'sync') {
+            const synced = decodePacket<SyncPayload>(acknowledged.wire);
+            // An acknowledged history also delivers the moves it contains.
+            const moveIds = new Set(synced.payload.moves.map((move) => move.packetId));
+            for (const item of latest.outbox) {
+              if (item.gameId === acknowledged.gameId && item.kind === 'move' && moveIds.has(item.packetId)) {
+                delivered.add(item.packetId);
+              }
+            }
+          }
+          return {
+            ...latest,
+            outbox: latest.outbox.filter((item) => !delivered.has(item.packetId)),
+            games: latest.games.map((game) => game.awaitingAck && delivered.has(game.awaitingAck)
+              ? { ...game, awaitingAck: null } : game),
+            chats: latest.chats.map((chat) => delivered.has(chat.id) && chat.mine
+              ? { ...chat, delivery: 'acked' as const }
+              : chat),
+          };
+        });
         break;
       }
       case 'sync-request': {
@@ -535,19 +559,31 @@ export function useMeshChess(): MeshChessApi {
         const payload = incoming.payload as Partial<SyncPayload>;
         if (!game || opponent(game, me.id).id !== incoming.from.id
           || !validateHistory(payload.moves) || !validResult(payload.status, payload.winner)) break;
+        const moves = payload.moves;
+        const status = payload.status;
         const differs = payload.moves.length !== game.moves.length
           || payload.moves.some((move, index) => move.packetId !== game.moves[index]?.packetId || move.fen !== game.moves[index]?.fen);
-        if (payload.moves.length > game.moves.length || (payload.moves.length === game.moves.length && differs)) {
-          commit((latest) => replaceGame(latest, game.id, (value) => ({
+        commit((latest) => {
+          const delivered = new Set(latest.outbox.filter((item) => item.gameId === game.id
+            && (item.kind === 'accept' || (item.kind === 'move' && moves.some((move, index) => (
+              move.packetId === item.packetId && move.fen === game.moves[index]?.fen
+            ))))).map((item) => item.packetId));
+          const updated = replaceGame(latest, game.id, (value) => ({
             ...value,
-            moves: payload.moves as MoveRecord[],
-            status: payload.status as GameStatus,
-            ...(payload.winner ? { winner: payload.winner } : { winner: undefined }),
-            drawOffer: null,
-            updatedAt: Date.now(),
-          })));
-        }
+            ...(moves.length > value.moves.length || (moves.length === value.moves.length && differs) ? {
+              moves,
+              status,
+              winner: payload.winner,
+              drawOffer: null,
+              updatedAt: Date.now(),
+            } : {}),
+            awaitingAck: value.awaitingAck && delivered.has(value.awaitingAck) ? null : value.awaitingAck,
+          }));
+          return { ...updated, outbox: updated.outbox.filter((item) => !delivered.has(item.packetId)) };
+        });
         sendAck(incoming);
+        // Never roll back an undelivered local move to the peer's older board.
+        if (moves.length < game.moves.length) sendSync(game, incoming.from.id);
         break;
       }
       case 'chat': {
