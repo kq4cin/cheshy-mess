@@ -27,7 +27,7 @@ import type {
 import { gameResult, makeMove, validateHistory } from '../lib/chess';
 import { decodePacket, encodePacket, GAME_CHANNEL, uniqueId } from '../lib/protocol';
 import { createDefaultState, loadState, saveState } from '../lib/storage';
-import { BLEAdapter, SerialAdapter } from '../lib/transports';
+import { BLEAdapter, radioMessageCount, SerialAdapter } from '../lib/transports';
 import type { Transport } from '../lib/transports';
 import { onServiceWorkerMessage } from '../sw-events';
 
@@ -46,7 +46,7 @@ export interface MeshChessApi {
   updateName(name: string): void;
   createChallenge(hostColor: Color | 'random'): void;
   withdrawChallenge(id: string): void;
-  acceptChallenge(challenge: Challenge): void;
+  acceptChallenge(challenge: Challenge): string | null;
   playMove(gameId: string, input: { from: string; to: string; promotion?: string }): boolean;
   resign(gameId: string): void;
   offerDraw(gameId: string): void;
@@ -80,6 +80,14 @@ function packet(
 
 function opponent(game: Game, localId: string): Player {
   return game.white.id === localId ? game.black : game.white;
+}
+
+function outboxRecipient(wire: string): string | undefined {
+  try {
+    return decodePacket(wire).to;
+  } catch {
+    return undefined;
+  }
 }
 
 const ANNOUNCED_STATUSES = new Set<GameStatus>(['checkmate', 'stalemate', 'draw', 'resigned']);
@@ -261,7 +269,9 @@ export function useMeshChess(): MeshChessApi {
             await adapter.send(current.wire);
           }
           sentAny = true;
-          addLog(`Sent ${current.kind}`);
+          addLog(active.kind === 'demo'
+            ? `Sent ${current.kind}`
+            : `Sent ${current.kind} (${radioMessageCount(current.wire)} radio message${radioMessageCount(current.wire) === 1 ? '' : 's'})`);
           commit((latest) => {
             const exists = latest.outbox.some((entry) => entry.id === current.id);
             if (!exists) return latest;
@@ -311,7 +321,7 @@ export function useMeshChess(): MeshChessApi {
       const coalesces = outgoing.kind === 'sync' || outgoing.kind === 'sync-request';
       const removed = coalesces
         ? latest.outbox.filter((entry) => entry.kind === outgoing.kind
-          && entry.gameId === outgoing.gameId && entry.wire.includes(`"to":"${outgoing.to}"`))
+          && entry.gameId === outgoing.gameId && outboxRecipient(entry.wire) === outgoing.to)
         : [];
       const removedIds = new Set(removed.map((entry) => entry.packetId));
       return {
@@ -374,7 +384,16 @@ export function useMeshChess(): MeshChessApi {
     }
     const current = stateRef.current;
     const me = current.profile;
-    if (incoming.from.id === me.id || (incoming.to !== undefined && incoming.to !== me.id)) return;
+    if (incoming.from.id === me.id) return;
+    const overRadio = transportRef.current.kind !== null && transportRef.current.kind !== 'demo';
+    if (incoming.to !== undefined && incoming.to !== me.id) {
+      // Surfacing this makes identity mismatches (e.g. an accept for a stale player id) visible.
+      if (overRadio && incoming.kind !== 'ack' && incoming.kind !== 'hello') {
+        addLog(`Ignored ${incoming.kind} from ${incoming.from.name}: addressed to another player`);
+      }
+      return;
+    }
+    if (overRadio) addLog(`Heard ${incoming.kind} from ${incoming.from.name}`);
     if (current.seen.includes(incoming.id)) {
       sendAck(incoming);
       return;
@@ -466,7 +485,7 @@ export function useMeshChess(): MeshChessApi {
             to: payload.to,
             ...(payload.promotion ? { promotion: payload.promotion } : {}),
           }, { packetId: incoming.id, at: incoming.sentAt });
-          if (move.san !== payload.san || move.fen !== payload.fen) throw new Error('Move metadata mismatch');
+          if (move.san !== payload.san || (payload.fen !== undefined && move.fen !== payload.fen)) throw new Error('Move metadata mismatch');
           const result = gameResult([...game.moves, move]);
           commit((latest) => replaceGame(latest, game.id, (value) => ({
             ...value,
@@ -754,11 +773,11 @@ export function useMeshChess(): MeshChessApi {
     enqueueRef.current(packet('withdraw', stateRef.current.profile, { challengeId: id }), false);
   }, [commit]);
 
-  const acceptChallenge = useCallback((challenge: Challenge) => {
+  const acceptChallenge = useCallback((challenge: Challenge): string | null => {
     const current = stateRef.current;
     const available = current.challenges.find((entry) => entry.id === challenge.id);
     if (!available || available.host.id === current.profile.id || available.withdrawn
-      || current.games.some((game) => game.challengeId === challenge.id)) return;
+      || current.games.some((game) => game.challengeId === challenge.id)) return null;
     challenge = available;
     const hostColor = challenge.hostColor === 'random' ? resolveRandom(challenge.id) : challenge.hostColor;
     const white = hostColor === 'w' ? challenge.host : current.profile;
@@ -777,6 +796,7 @@ export function useMeshChess(): MeshChessApi {
       challenges: latest.challenges.map((entry) => entry.id === challenge.id ? { ...entry, withdrawn: true } : entry),
     }));
     enqueueRef.current(outgoing);
+    return game.id;
   }, [commit]);
 
   const playMove = useCallback((gameId: string, input: { from: string; to: string; promotion?: string }): boolean => {
@@ -794,7 +814,6 @@ export function useMeshChess(): MeshChessApi {
         to: move.to,
         ...(move.promotion ? { promotion: move.promotion } : {}),
         san: move.san,
-        fen: move.fen,
       };
       const result = gameResult([...game.moves, move]);
       const outgoing = packet('move', current.profile, payload, {

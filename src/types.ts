@@ -92,7 +92,7 @@ export interface Packet<T = unknown> {
 }
 export interface ChallengePayload { challengeId: string; hostColor: Color | 'random' }
 export interface AcceptPayload { challengeId: string; gameId: string; white: Player; black: Player }
-export interface MovePayload { n: number; from: string; to: string; promotion?: string; san: string; fen: string }
+export interface MovePayload { n: number; from: string; to: string; promotion?: string; san: string; fen?: string }
 export interface AckPayload { packetId: string; gameId?: string; moveCount: number }
 export interface SyncPayload { moves: MoveRecord[]; status: GameStatus; winner?: Color }
 export interface ChatPayload { text: string }

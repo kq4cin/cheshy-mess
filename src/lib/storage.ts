@@ -22,11 +22,45 @@ export function createDefaultState(): PersistedState {
   };
 }
 
-function createProfile(): Profile {
+function createProfile(name?: string): Profile {
   return {
     id: uniqueId('player'),
-    name: `Guest ${Math.floor(1000 + Math.random() * 9000)}`,
+    name: name ?? `Guest ${Math.floor(1000 + Math.random() * 9000)}`,
   };
+}
+
+// Identities from before the compact radio format used 43-character ids that bloat every packet.
+const MAX_PROFILE_ID_LENGTH = 24;
+
+interface LockManagerLike {
+  request(name: string, options: { ifAvailable: boolean }, callback: (lock: unknown) => Promise<void> | void): Promise<unknown>;
+}
+
+// Holds a Web Lock for the tab's lifetime so a second tab cannot reuse the same player identity.
+// Identities this page already holds are remembered globally so StrictMode re-mounts and hot
+// reloads within the same tab re-claim them instead of minting new players.
+const heldIdentities: Map<string, Promise<boolean>> = ((globalThis as { __cheshyMessIdentities?: Map<string, Promise<boolean>> }).__cheshyMessIdentities ??= new Map());
+
+function claimIdentity(id: string): Promise<boolean> {
+  const existing = heldIdentities.get(id);
+  if (existing) return existing;
+  const locks = (globalThis.navigator as Navigator & { locks?: LockManagerLike } | undefined)?.locks;
+  if (!locks?.request) return Promise.resolve(true);
+  const claim = new Promise<boolean>((resolve) => {
+    locks.request(`cheshy-mess-identity:${id}`, { ifAvailable: true }, (lock) => {
+      if (!lock) {
+        resolve(false);
+        return;
+      }
+      resolve(true);
+      return new Promise<void>(() => undefined);
+    }).catch(() => resolve(true));
+  });
+  heldIdentities.set(id, claim);
+  void claim.then((held) => {
+    if (!held) heldIdentities.delete(id);
+  });
+  return claim;
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -107,7 +141,23 @@ function storeSessionProfile(profile: Profile): void {
 export async function loadState(): Promise<PersistedState> {
   const stored = await readStoredState();
   const state = stored ?? createDefaultState();
-  const profile = sessionProfile() ?? createProfile();
+  const usable = (profile: Profile | null | undefined): profile is Profile =>
+    !!profile && profile.id.length <= MAX_PROFILE_ID_LENGTH;
+  // Same tab reload first, then this device's saved identity, so players keep their games across restarts.
+  const session = sessionProfile();
+  const saved = stored?.profile;
+  let profile: Profile | null = null;
+  let storedHeldElsewhere = false;
+  if (usable(session) && await claimIdentity(session.id)) profile = session;
+  else if (usable(saved)) {
+    if (await claimIdentity(saved.id)) profile = saved;
+    else storedHeldElsewhere = true;
+  }
+  if (!profile) {
+    // Keep this tab's name; never copy the name of an identity another open tab is using.
+    profile = createProfile(session?.name ?? (storedHeldElsewhere ? undefined : saved?.name));
+    await claimIdentity(profile.id);
+  }
   storeSessionProfile(profile);
   const loaded = { ...state, profile };
   await saveState(loaded);

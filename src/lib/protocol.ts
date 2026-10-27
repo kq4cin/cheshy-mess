@@ -1,6 +1,9 @@
 import type { Packet, PacketKind, Player } from '../types';
 
-export const PROTOCOL_PREFIX = 'MC1:';
+// MC2 is the compact radio encoding; MC1 (verbose JSON) is still accepted from older clients and queued items.
+export const PROTOCOL_PREFIX = 'MC2:';
+export const LEGACY_PROTOCOL_PREFIX = 'MC1:';
+export const WIRE_PREFIXES = [PROTOCOL_PREFIX, LEGACY_PROTOCOL_PREFIX] as const;
 export const GAME_CHANNEL = '#chess';
 export const MAX_PACKET_BYTES = 12_000;
 export const MAX_SYNC_PACKET_BYTES = MAX_PACKET_BYTES;
@@ -70,9 +73,26 @@ function assertSize(bytes: Uint8Array): void {
   }
 }
 
+// Every LoRa fragment is a chance to lose the whole packet, so field names travel as single capitals.
+// No long key is a single capital letter, which keeps the mapping unambiguous in both directions.
+const SHORT_KEYS: Record<string, string> = {
+  id: 'I', kind: 'K', from: 'F', to: 'T', gameId: 'G', payload: 'P', sentAt: 'S',
+  challengeId: 'C', hostColor: 'H', white: 'W', black: 'B', name: 'N', promotion: 'Q',
+  san: 'A', fen: 'X', packetId: 'D', moveCount: 'M', moves: 'Y', status: 'Z', winner: 'R',
+  text: 'E', response: 'O', offerId: 'U', outcome: 'J', reason: 'L', color: 'V',
+};
+const LONG_KEYS = Object.fromEntries(Object.entries(SHORT_KEYS).map(([long, short]) => [short, long]));
+
+function renameKeys(value: unknown, table: Record<string, string>): unknown {
+  if (Array.isArray(value)) return value.map((entry) => renameKeys(entry, table));
+  if (!isObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [table[key] ?? key, renameKeys(entry, table)]));
+}
+
 export function encodePacket(packet: Packet): string {
   assertValidPacket(packet);
-  const wire = PROTOCOL_PREFIX + JSON.stringify(packet);
+  const { v: _version, ...body } = packet;
+  const wire = PROTOCOL_PREFIX + JSON.stringify(renameKeys(body, SHORT_KEYS));
   assertSize(encoder.encode(wire));
   return wire;
 }
@@ -91,7 +111,8 @@ export function decodePacket<T = unknown>(wire: string | Uint8Array | ArrayBuffe
   } catch {
     throw new Error('Invalid MeshChess packet: malformed UTF-8');
   }
-  if (!text.startsWith(PROTOCOL_PREFIX)) packetError('missing MC1 prefix');
+  const compact = text.startsWith(PROTOCOL_PREFIX);
+  if (!compact && !text.startsWith(LEGACY_PROTOCOL_PREFIX)) packetError('missing MC2/MC1 prefix');
 
   let value: unknown;
   try {
@@ -99,21 +120,23 @@ export function decodePacket<T = unknown>(wire: string | Uint8Array | ArrayBuffe
   } catch {
     throw new Error('Invalid MeshChess packet: malformed JSON');
   }
+  if (compact) {
+    if (!isObject(value)) packetError('expected an object');
+    value = { v: 1, ...(renameKeys(value, LONG_KEYS) as Record<string, unknown>) };
+  }
   assertValidPacket(value);
   return value as Packet<T>;
 }
 
+// 10 base-36 characters (~51 bits) is ample for a local mesh and far cheaper on air than a UUID.
 export function uniqueId(prefix = 'mc'): string {
+  const bytes = new Uint8Array(8);
   const cryptoApi = globalThis.crypto;
-  if (cryptoApi?.randomUUID) return `${prefix}_${cryptoApi.randomUUID()}`;
-  const bytes = new Uint8Array(16);
   if (cryptoApi) cryptoApi.getRandomValues(bytes);
   else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
-  return `${prefix}_${Date.now().toString(36)}_${hex(bytes)}`;
-}
-
-function hex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+  return `${prefix}_${value.toString(36).padStart(10, '0').slice(-10)}`;
 }
 
 export async function hashtagKey(name: string = GAME_CHANNEL): Promise<Uint8Array> {

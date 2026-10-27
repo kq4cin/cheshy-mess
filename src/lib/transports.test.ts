@@ -3,6 +3,7 @@ import { GAME_CHANNEL, hashtagKey, MAX_PACKET_BYTES } from './protocol';
 import {
   encodeSerialFrame,
   FRAGMENT_ASSEMBLY_TTL_MS,
+  FRAGMENT_PAYLOAD_BYTES,
   MAX_FRAGMENT_ASSEMBLIES,
   MeshCoreClient,
   RADIO_TEXT_MAX_BYTES,
@@ -181,21 +182,23 @@ describe('MeshCore text fragmentation', () => {
     expect(received).toEqual(['still ordinary']);
   });
 
-  it('bounds concurrent assemblies without evicting active messages', async () => {
+  it('evicts the stalest partial packet so lost fragments cannot block new traffic', async () => {
     const { client, received } = await clientHarness();
-    const firstChunk = btoa('x'.repeat(48));
+    vi.useFakeTimers();
+    const firstChunk = btoa('x'.repeat(FRAGMENT_PAYLOAD_BYTES));
     for (let index = 0; index <= MAX_FRAGMENT_ASSEMBLIES; index += 1) {
       client.handleFrame(channelText(`MCF:assembly${index}:0:2:${firstChunk}`));
+      vi.advanceTimersByTime(10);
     }
     client.handleFrame(channelText(`MCF:assembly0:1:2:${btoa('y')}`));
     client.handleFrame(channelText(`MCF:assembly${MAX_FRAGMENT_ASSEMBLIES}:1:2:${btoa('z')}`));
-    expect(received).toEqual(['x'.repeat(48) + 'y']);
+    expect(received).toEqual(['x'.repeat(FRAGMENT_PAYLOAD_BYTES) + 'z']);
   });
 
   it('expires stale partial assemblies', async () => {
     const { client, received } = await clientHarness();
     vi.useFakeTimers();
-    client.handleFrame(channelText(`MCF:stale1:0:2:${btoa('x'.repeat(48))}`));
+    client.handleFrame(channelText(`MCF:stale1:0:2:${btoa('x'.repeat(FRAGMENT_PAYLOAD_BYTES))}`));
     vi.advanceTimersByTime(FRAGMENT_ASSEMBLY_TTL_MS + 1);
     client.handleFrame(channelText(`MCF:stale1:1:2:${btoa('y')}`));
     expect(received).toEqual([]);

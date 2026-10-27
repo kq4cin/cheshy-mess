@@ -1,16 +1,18 @@
-import { GAME_CHANNEL, hashtagKey, MAX_PACKET_BYTES, PROTOCOL_PREFIX } from './protocol';
+import { GAME_CHANNEL, hashtagKey, MAX_PACKET_BYTES, WIRE_PREFIXES } from './protocol';
 import type { TransportKind, TransportState } from '../types';
 
 export const SERIAL_BAUD_RATE = 115200;
-export const RADIO_TEXT_MAX_BYTES = 96;
+// Firmware caps channel text at 160 bytes including the "<node name>: " prefix (node names are <= 31 bytes).
+export const RADIO_TEXT_MAX_BYTES = 120;
 export const FRAGMENT_DELAY_MS = 1_200;
 export const FRAGMENT_ASSEMBLY_TTL_MS = 120_000;
-export const MAX_FRAGMENT_ASSEMBLIES = 8;
+export const MAX_FRAGMENT_ASSEMBLIES = 16;
 export const NORDIC_UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 export const NORDIC_UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 export const NORDIC_UART_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
-const FRAGMENT_PAYLOAD_BYTES = 48;
+// 72 bytes base64-encode to 96 characters; with the MCF header a fragment stays within RADIO_TEXT_MAX_BYTES.
+export const FRAGMENT_PAYLOAD_BYTES = 72;
 const MAX_FRAGMENTS = Math.ceil(MAX_PACKET_BYTES / FRAGMENT_PAYLOAD_BYTES);
 const FRAGMENT_PATTERN = /^MCF:([A-Za-z0-9]{4,12}):(\d{1,3}):(\d{1,3}):([A-Za-z0-9+/]*={0,2})$/;
 
@@ -158,16 +160,22 @@ function hex(bytes: Uint8Array): string {
 }
 
 const FRAGMENT_PREFIX = 'MCF:';
+const PAYLOAD_PREFIXES = [FRAGMENT_PREFIX, ...WIRE_PREFIXES];
 
 // Firmware sends channel text as "<sender node name>: <text>"; recover the app payload after that prefix.
 export function stripSenderPrefix(text: string): string {
-  if (text.startsWith(FRAGMENT_PREFIX) || text.startsWith(PROTOCOL_PREFIX)) return text;
+  if (PAYLOAD_PREFIXES.some((prefix) => text.startsWith(prefix))) return text;
   let best = -1;
-  for (const marker of [`: ${FRAGMENT_PREFIX}`, `: ${PROTOCOL_PREFIX}`]) {
-    const index = text.indexOf(marker);
+  for (const prefix of PAYLOAD_PREFIXES) {
+    const index = text.indexOf(`: ${prefix}`);
     if (index >= 0 && (best < 0 || index < best)) best = index;
   }
   return best < 0 ? text : text.slice(best + 2);
+}
+
+export function radioMessageCount(text: string): number {
+  const bytes = textEncoder.encode(text).byteLength;
+  return bytes <= RADIO_TEXT_MAX_BYTES && !text.startsWith(FRAGMENT_PREFIX) ? 1 : Math.ceil(bytes / FRAGMENT_PAYLOAD_BYTES);
 }
 
 export function parseChannelMessage(frame: Uint8Array): ChannelTextMessage | null {
@@ -370,7 +378,19 @@ export class MeshCoreClient {
       return;
     }
     if (!assembly) {
-      if (this.assemblies.size >= MAX_FRAGMENT_ASSEMBLIES) return;
+      // A lost fragment strands its partial packet until it expires; evict the stalest one instead of
+      // refusing new packets, otherwise a few RF losses would block all incoming traffic for minutes.
+      if (this.assemblies.size >= MAX_FRAGMENT_ASSEMBLIES) {
+        let stalest: string | null = null;
+        let stalestExpiry = Infinity;
+        for (const [candidate, entry] of this.assemblies) {
+          if (entry.expiresAt < stalestExpiry) {
+            stalest = candidate;
+            stalestExpiry = entry.expiresAt;
+          }
+        }
+        if (stalest) this.assemblies.delete(stalest);
+      }
       assembly = {
         chunks: Array.from({ length: total }),
         received: 0,

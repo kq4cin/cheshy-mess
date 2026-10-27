@@ -9,6 +9,7 @@ import {
   uniqueId,
   validatePacket,
 } from './protocol';
+import { radioMessageCount } from './transports';
 
 function packet(payload: unknown = { text: 'hello' }): Packet {
   return {
@@ -25,9 +26,41 @@ describe('MeshChess wire protocol', () => {
   it('round-trips prefixed UTF-8 JSON without changing the packet', () => {
     const original = packet({ text: 'Checkmate ♞' });
     const wire = encodePacket(original);
-    expect(wire.startsWith('MC1:')).toBe(true);
+    expect(wire.startsWith('MC2:')).toBe(true);
     expect(decodePacket(wire)).toEqual(original);
     expect(decodePacket(new TextEncoder().encode(wire))).toEqual(original);
+  });
+
+  it('still decodes verbose MC1 packets from older clients', () => {
+    const original = packet({ text: 'from an older build' });
+    expect(decodePacket('MC1:' + JSON.stringify(original))).toEqual(original);
+  });
+
+  it('keeps an accept small enough for a few LoRa messages', () => {
+    const player = (name: string) => ({ id: uniqueId('player'), name });
+    const host = player('Guest 1234');
+    const guest = player('Guest 5678');
+    const gameId = uniqueId('game');
+    const accept: Packet = {
+      v: 1,
+      id: uniqueId('accept'),
+      kind: 'accept',
+      from: guest,
+      to: host.id,
+      gameId,
+      payload: { challengeId: uniqueId('challenge'), gameId, white: host, black: guest },
+      sentAt: Date.now(),
+    };
+    const wire = encodePacket(accept);
+    expect(new TextEncoder().encode(wire).byteLength).toBeLessThan(320);
+    expect(radioMessageCount(wire)).toBeLessThanOrEqual(5);
+    expect(decodePacket(wire)).toEqual(accept);
+    expect(uniqueId('player').length).toBeLessThanOrEqual(24);
+  });
+
+  it('fits a hello into a single radio message', () => {
+    const hello: Packet = { v: 1, id: uniqueId('hello'), kind: 'hello', from: { id: uniqueId('player'), name: 'Guest 1234' }, payload: {}, sentAt: Date.now() };
+    expect(radioMessageCount(encodePacket(hello))).toBe(1);
   });
 
   it('rejects malformed prefixes, JSON, versions, senders, and kinds', () => {
