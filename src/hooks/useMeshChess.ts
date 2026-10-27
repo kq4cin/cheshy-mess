@@ -220,6 +220,16 @@ export function useMeshChess(): MeshChessApi {
     enqueueRef.current(outgoing, false);
   }, [commit]);
 
+  // Challenges are one-shot broadcasts; repeat open ones when a radio link appears or a new player is heard.
+  const announceOpenChallenges = useCallback(() => {
+    const current = stateRef.current;
+    for (const challenge of current.challenges) {
+      if (challenge.withdrawn || challenge.host.id !== current.profile.id) continue;
+      const payload: ChallengePayload = { challengeId: challenge.id, hostColor: challenge.hostColor };
+      enqueueRef.current(packet('challenge', current.profile, payload), false);
+    }
+  }, []);
+
   const flushOutbox = useCallback((): Promise<void> => {
     const run = flushTailRef.current.then(async () => {
       const active = transportRef.current;
@@ -385,6 +395,7 @@ export function useMeshChess(): MeshChessApi {
         upsertPeer();
         if (unknown) {
           enqueueRef.current(packet('hello', stateRef.current.profile, {}, { to: incoming.from.id }), false);
+          announceOpenChallenges();
         }
         break;
       }
@@ -397,6 +408,12 @@ export function useMeshChess(): MeshChessApi {
           hostColor: incoming.payload.hostColor,
           createdAt: incoming.sentAt,
         };
+        // Hosts re-announce open challenges, so never revive one this device already saw withdrawn or accepted.
+        const known = current.challenges.find((entry) => entry.id === challenge.id);
+        if (known?.withdrawn || current.games.some((game) => game.challengeId === challenge.id)) {
+          upsertPeer();
+          break;
+        }
         commit((latest) => ({
           ...latest,
           challenges: [...latest.challenges.filter((entry) => entry.id !== challenge.id), challenge],
@@ -596,7 +613,7 @@ export function useMeshChess(): MeshChessApi {
         break;
       }
     }
-  }, [addLog, announceResult, commit, sendAck, sendSync, sendSyncRequest]);
+  }, [addLog, announceOpenChallenges, announceResult, commit, sendAck, sendSync, sendSyncRequest]);
   receiveRef.current = receive;
 
   const disconnect = useCallback(async (): Promise<void> => {
@@ -653,6 +670,7 @@ export function useMeshChess(): MeshChessApi {
       }
       addLog(`${kind === 'serial' ? 'USB' : 'Bluetooth'} radio ready on ${GAME_CHANNEL}`);
       enqueueRef.current(packet('hello', stateRef.current.profile, {}), false);
+      announceOpenChallenges();
       void flushRef.current();
     } catch (error) {
       if (connectionRef.current === connection) {
@@ -661,7 +679,7 @@ export function useMeshChess(): MeshChessApi {
       }
       throw error;
     }
-  }, [addLog, disconnect, updateTransport]);
+  }, [addLog, announceOpenChallenges, disconnect, updateTransport]);
   connectRef.current = connect;
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { GAME_CHANNEL, hashtagKey, MAX_PACKET_BYTES } from './protocol';
+import { GAME_CHANNEL, hashtagKey, MAX_PACKET_BYTES, PROTOCOL_PREFIX } from './protocol';
 import type { TransportKind, TransportState } from '../types';
 
 export const SERIAL_BAUD_RATE = 115200;
@@ -155,6 +155,19 @@ function decodeCString(bytes: Uint8Array): string {
 
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+const FRAGMENT_PREFIX = 'MCF:';
+
+// Firmware sends channel text as "<sender node name>: <text>"; recover the app payload after that prefix.
+export function stripSenderPrefix(text: string): string {
+  if (text.startsWith(FRAGMENT_PREFIX) || text.startsWith(PROTOCOL_PREFIX)) return text;
+  let best = -1;
+  for (const marker of [`: ${FRAGMENT_PREFIX}`, `: ${PROTOCOL_PREFIX}`]) {
+    const index = text.indexOf(marker);
+    if (index >= 0 && (best < 0 || index < best)) best = index;
+  }
+  return best < 0 ? text : text.slice(best + 2);
 }
 
 export function parseChannelMessage(frame: Uint8Array): ChannelTextMessage | null {
@@ -325,7 +338,8 @@ export class MeshCoreClient {
     }
   }
 
-  private receiveChannelText(text: string): void {
+  private receiveChannelText(raw: string): void {
+    const text = stripSenderPrefix(raw);
     const match = FRAGMENT_PATTERN.exec(text);
     if (!match) {
       this.callbacks.onMessage?.(text);

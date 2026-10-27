@@ -7,6 +7,7 @@ import {
   MeshCoreClient,
   RADIO_TEXT_MAX_BYTES,
   SerialFrameParser,
+  stripSenderPrefix,
 } from './transports';
 
 function inboundSerialFrame(payload: Uint8Array): Uint8Array {
@@ -203,6 +204,23 @@ describe('MeshCore text fragmentation', () => {
   it('does not accept a matching channel name with the wrong secret', async () => {
     await expect(clientHarness({ slots: [PUBLIC_SLOT, { name: GAME_CHANNEL, secret: new Uint8Array(16).fill(7) }] }))
       .rejects.toThrow(/No free MeshCore channel slot/);
+  });
+});
+
+describe('MeshCore sender prefix', () => {
+  it('reassembles fragments that arrive as "<node name>: <text>" like real firmware', async () => {
+    const { client, received, radioTexts } = await clientHarness();
+    const packet = `MC1:${JSON.stringify({ kind: 'challenge', pad: 'x'.repeat(150) })}`;
+    await client.sendChannel(packet);
+    expect(radioTexts.length).toBeGreaterThan(1);
+    for (const fragment of radioTexts) client.handleFrame(channelText(`KQ4CIN Base: Camp: ${fragment}`));
+    expect(received).toEqual([packet]);
+  });
+
+  it('strips the prefix from short packets and leaves ordinary chatter alone', () => {
+    expect(stripSenderPrefix('Alice: MC1:{"v":1}')).toBe('MC1:{"v":1}');
+    expect(stripSenderPrefix('MCF:abcd1234:0:1:QQ==')).toBe('MCF:abcd1234:0:1:QQ==');
+    expect(stripSenderPrefix('Bob: hello everyone')).toBe('Bob: hello everyone');
   });
 });
 
