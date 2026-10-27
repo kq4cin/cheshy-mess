@@ -175,7 +175,7 @@ function App() {
             <div><strong>{opponent.name}</strong><span><span className="tiny-dot" />{onlinePeers.some((p) => p.id === opponent.id) ? 'Recently on mesh' : 'Asynchronous opponent'}</span></div>
             <div className="player-strip-right"><span className="color-label">{game.localColor === 'w' ? 'BLACK' : 'WHITE'}</span><button className="icon-button"><MoreHorizontal size={20} /></button></div>
           </div>
-          <div className="board-frame"><ChessBoard moves={game.moves} localColor={game.localColor} interactive={myTurn && !game.awaitingAck} orientation={orientation} onMove={(input) => mesh.playMove(game.id, input)} reviewPly={reviewPly} onReviewEnd={() => setReviewPly(null)} /></div>
+          <div className="board-frame"><ChessBoard moves={game.moves} localColor={game.localColor} interactive={myTurn} orientation={orientation} onMove={(input) => mesh.playMove(game.id, input)} reviewPly={reviewPly} onReviewEnd={() => setReviewPly(null)} /></div>
           <div className="player-strip local-strip">
             <span className="player-avatar local">{state.profile.name.slice(0, 1).toUpperCase()}</span>
             <div><strong>{state.profile.name} <span className="you-tag">YOU</span></strong><span>{game.localColor === 'w' ? 'White pieces' : 'Black pieces'}</span></div>

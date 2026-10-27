@@ -487,14 +487,22 @@ export function useMeshChess(): MeshChessApi {
           }, { packetId: incoming.id, at: incoming.sentAt });
           if (move.san !== payload.san || (payload.fen !== undefined && move.fen !== payload.fen)) throw new Error('Move metadata mismatch');
           const result = gameResult([...game.moves, move]);
-          commit((latest) => replaceGame(latest, game.id, (value) => ({
-            ...value,
-            moves: [...value.moves, move],
-            status: result.status,
-            ...(result.winner ? { winner: result.winner } : { winner: undefined }),
-            drawOffer: null,
-            updatedAt: Date.now(),
-          })));
+          commit((latest) => {
+            // Their next move proves our earlier move/accept arrived, even if the ack was lost on air.
+            const delivered = new Set(latest.outbox
+              .filter((item) => item.gameId === game.id && (item.kind === 'move' || item.kind === 'accept'))
+              .map((item) => item.packetId));
+            const updated = replaceGame(latest, game.id, (value) => ({
+              ...value,
+              moves: [...value.moves, move],
+              status: result.status,
+              ...(result.winner ? { winner: result.winner } : { winner: undefined }),
+              drawOffer: null,
+              awaitingAck: value.awaitingAck && delivered.has(value.awaitingAck) ? null : value.awaitingAck,
+              updatedAt: Date.now(),
+            }));
+            return { ...updated, outbox: updated.outbox.filter((item) => !delivered.has(item.packetId)) };
+          });
           sendAck(incoming);
         } catch {
           sendSyncRequest(game.id, incoming.from.id);
