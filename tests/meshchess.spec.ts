@@ -268,7 +268,8 @@ test('display name supports continuous typing, replacement and persistence', asy
   await name.fill('');
   await expect(name).toHaveValue('');
   await name.pressSequentially('Bob Jones');
-  await close.click();
+  await page.getByRole('button', { name: 'Save and return' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(name).toHaveValue('Bob Jones');
   await name.fill('   ');
