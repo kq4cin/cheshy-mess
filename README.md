@@ -28,6 +28,8 @@ A chess game you can play **anywhere** — even with no internet at all. It's **
 
 White moves first. You can move only on your turn in an active game. Use **Resign** below the board to end an active game, or the **trash button** beside your opponent to remove a game from this device (including its chat and queued packets). Removing a game does not resign it or change the opponent's copy. Finished games offer **New game** instead of Resign.
 
+If someone missed your challenge, use **Reannounce challenges** in the **Lobby** while connected. This resends your open challenges without creating new ones.
+
 On phones and tablets, tap **Chat** below the board to open messages, then **Back to board** to return without closing the app. Your unsent draft stays in place. Chat resizes with the on-screen keyboard; Escape also closes the panel.
 
 The mobile **Games** screen lists your saved games, with **All**, **Your turn**, and **Finished** filters. Tap a game to play, then **All games** to switch opponents. **Moves** opens history, draw offers, export, and sync controls; tapping a move returns to the board for review. Choose **Return to live** before playing again. The bottom navigation keeps **Games**, **Lobby**, **New**, and **Mesh** within reach.

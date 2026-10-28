@@ -46,6 +46,7 @@ export interface MeshChessApi {
   disconnect(): Promise<void>;
   updateName(name: string): void;
   createChallenge(hostColor: Color | 'random'): void;
+  reannounceChallenges(): void;
   withdrawChallenge(id: string): void;
   acceptChallenge(challenge: Challenge): string | null;
   playMove(gameId: string, input: { from: string; to: string; promotion?: string }): boolean;
@@ -1044,6 +1045,7 @@ export function useMeshChess(): MeshChessApi {
     disconnect,
     updateName,
     createChallenge,
+    reannounceChallenges: announceOpenChallenges,
     withdrawChallenge,
     acceptChallenge,
     playMove,
