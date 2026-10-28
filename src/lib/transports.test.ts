@@ -35,9 +35,112 @@ afterEach(() => {
   for (const client of clients) client.stop();
   clients.length = 0;
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 interface RadioSlot { name: string; secret: Uint8Array }
+
+describe('Bluetooth radio selection', () => {
+  async function harness(savedId?: string) {
+    vi.resetModules();
+    const { BLEAdapter, MeshCoreClient, NORDIC_UART_SERVICE } = await import('./transports');
+    vi.spyOn(MeshCoreClient.prototype, 'start').mockResolvedValue();
+    const characteristic = {
+      startNotifications: vi.fn().mockResolvedValue(undefined),
+      stopNotifications: vi.fn().mockResolvedValue(undefined),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      writeValueWithResponse: vi.fn().mockResolvedValue(undefined),
+    };
+    const gatt = {
+      connected: true,
+      connect: vi.fn().mockImplementation(async () => gatt),
+      disconnect: vi.fn(),
+      getPrimaryService: vi.fn().mockResolvedValue({
+        getCharacteristic: vi.fn().mockResolvedValue(characteristic),
+      }),
+    };
+    const device = { id: 'radio-1', gatt };
+    const bluetooth = {
+      requestDevice: vi.fn().mockResolvedValue(device),
+      getDevices: vi.fn().mockResolvedValue([device]),
+    };
+    const values = new Map(savedId ? [['meshchess-bluetooth-device', savedId]] : []);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    });
+    vi.stubGlobal('navigator', { bluetooth });
+    const onLog = vi.fn();
+    return { BLEAdapter, bluetooth, device, values, onLog, NORDIC_UART_SERVICE };
+  }
+
+  it('uses the Mesh Wars chooser filters and reuses the device on reconnect', async () => {
+    const { BLEAdapter, bluetooth, values, NORDIC_UART_SERVICE } = await harness();
+    const adapter = new BLEAdapter();
+    await adapter.connect();
+    expect(bluetooth.requestDevice).toHaveBeenCalledWith({
+      filters: [{ services: [NORDIC_UART_SERVICE] }, { namePrefix: 'MeshCore' }],
+      optionalServices: [NORDIC_UART_SERVICE],
+    });
+    expect(values.get('meshchess-bluetooth-device')).toBe('radio-1');
+    await adapter.disconnect();
+    const next = new BLEAdapter();
+    await next.connect();
+    expect(bluetooth.requestDevice).toHaveBeenCalledTimes(1);
+    await next.disconnect();
+  });
+
+  it('restores a previously authorized radio after a reload without opening the chooser', async () => {
+    const { BLEAdapter, bluetooth } = await harness('radio-1');
+    const adapter = new BLEAdapter();
+    await adapter.connect();
+    expect(bluetooth.getDevices).toHaveBeenCalledOnce();
+    expect(bluetooth.requestDevice).not.toHaveBeenCalled();
+    await adapter.disconnect();
+  });
+
+  it('can explicitly choose a different radio', async () => {
+    const { BLEAdapter, bluetooth } = await harness('radio-1');
+    const adapter = new BLEAdapter();
+    await adapter.connect();
+    await adapter.disconnect();
+    await adapter.connect(undefined, true);
+    expect(bluetooth.requestDevice).toHaveBeenCalledOnce();
+    await adapter.disconnect();
+  });
+
+  it('opens the chooser if the saved permission is no longer available', async () => {
+    const { BLEAdapter, bluetooth } = await harness('radio-1');
+    bluetooth.getDevices.mockResolvedValue([]);
+    const adapter = new BLEAdapter();
+    await adapter.connect();
+    expect(bluetooth.requestDevice).toHaveBeenCalledOnce();
+    await adapter.disconnect();
+  });
+
+  it('logs restoration errors and lets the user select a radio', async () => {
+    const { BLEAdapter, bluetooth, onLog } = await harness('radio-1');
+    bluetooth.getDevices.mockRejectedValue(new Error('Permission lookup failed'));
+    const adapter = new BLEAdapter({ onLog });
+    await adapter.connect();
+    expect(onLog).toHaveBeenCalledWith('Could not restore Bluetooth selection: Permission lookup failed');
+    expect(bluetooth.requestDevice).toHaveBeenCalledOnce();
+    await adapter.disconnect();
+  });
+
+  it('surfaces a failed saved-radio connection without silently pairing another device', async () => {
+    const { BLEAdapter, bluetooth, device } = await harness('radio-1');
+    device.gatt.connect.mockRejectedValue(new Error('Radio unavailable'));
+    const onState = vi.fn();
+    await expect(new BLEAdapter({ onState }).connect()).rejects.toThrow('Radio unavailable');
+    expect(bluetooth.requestDevice).not.toHaveBeenCalled();
+    expect(onState).toHaveBeenLastCalledWith({
+      kind: 'ble', status: 'error', detail: 'Radio unavailable',
+    });
+  });
+});
 
 const PUBLIC_SLOT: RadioSlot = { name: 'Public', secret: Uint8Array.from({ length: 16 }, (_, index) => index + 1) };
 const EMPTY_SLOT = (): RadioSlot => ({ name: '', secret: new Uint8Array(16) });

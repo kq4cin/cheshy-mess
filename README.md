@@ -26,6 +26,8 @@ A chess game you can play **anywhere** — even with no internet at all. It's **
 2. Click **Start a new game**, pick a color, and post your challenge to **#chess**.
 3. When another player accepts, your game begins.
 
+White moves first. You can move only on your turn in an active game. Use **Resign** below the board to end an active game, or the **trash button** beside your opponent to remove a game from this device (including its chat and queued packets). Removing a game does not resign it or change the opponent's copy. Finished games offer **New game** instead of Resign.
+
 **No radio and no friend nearby?** Open the game in a **second browser tab** (same browser). The built-in demo mode lets your two tabs find each other, so you can accept your own challenge and play both sides to see how it works.
 
 ---
@@ -59,6 +61,8 @@ You do **not** need this to play. To play with real people nearby — with **no 
 2. Open the connection menu in the top bar and choose **USB Serial** or **Bluetooth LE**, then pick your radio.
 3. The game automatically sets up a public channel on your radio called **#chess**. Other players on that channel show up under **Heard on the mesh**.
 
+Bluetooth reconnects reuse your last selected radio; supported browsers can also restore that selection after a reload. Use **Choose another Bluetooth radio** in Mesh to switch devices. Like Mesh Wars, the app uses the standard Web Bluetooth connection flow and does not request or store a BLE PIN. Android or radio firmware may still require pairing; the app cannot bypass that prompt.
+
 Moves and chat travel as tiny radio packets. If your radio disconnects, moves and messages **queue up and send when it reconnects** — the other player can be offline for days.
 
 When a game ends, a small result announcement is posted to **#chess** ("Alice beat Bob · checkmate"). Everyone on the channel sees recent results in the **Lobby**.
@@ -78,8 +82,8 @@ When a game ends, a small result announcement is posted to **#chess** ("Alice be
 | My radio won't connect | Use Chrome or Edge, and close other apps using the radio. Open **Mesh → Connection activity** to see what the radio reported |
 | No free channel slot on my radio | Free a slot in the MeshCore app, then reconnect |
 | I added #chess myself but the game can't find it | Add it as a **public hashtag channel** named `#chess` (not a private channel), so its key matches |
-| A game stays on "Delivering move" | Keep both players connected to the same transport, then click the sync button beside "Awaiting acknowledgement". Sync resends missing moves and confirms moves the opponent already received |
-| I want to start over | Clear the site's data in your browser settings |
+| A game stays on "Delivering move" or "Confirming result" | Keep both players connected to the same transport, then tap that status to retry sync. Sync resends missing moves and confirms moves or results the opponent already received |
+| I want to start over | Use the trash button beside the opponent to remove the game, then start a new one. There is no need to clear your browser data |
 
 ---
 
