@@ -40,7 +40,7 @@ export interface MeshChessApi {
   state: PersistedState;
   transport: TransportState;
   logs: RadioLog[];
-  connect(kind: TransportKind): Promise<void>;
+  connect(kind: TransportKind, chooseNewDevice?: boolean): Promise<void>;
   disconnect(): Promise<void>;
   updateName(name: string): void;
   createChallenge(hostColor: Color | 'random'): void;
@@ -152,6 +152,21 @@ function acceptedGame(payload: AcceptPayload, localId: string): Game {
 function validResult(status: unknown, winner: unknown): status is GameStatus {
   return typeof status === 'string' && GAME_STATUSES.has(status as GameStatus)
     && (winner === undefined || winner === 'w' || winner === 'b');
+}
+
+function syncConfirms(item: OutboxItem, payload: SyncPayload, game: Game): boolean {
+  if (item.kind === 'accept') return true;
+  if (item.kind === 'move') return payload.moves.some((move, index) => (
+    move.packetId === item.packetId && move.fen === game.moves[index]?.fen
+  ));
+  if (item.kind === 'resign') {
+    const outgoing = decodePacket(item.wire);
+    const winner = outgoing.from.id === game.white.id ? 'b' : 'w';
+    return payload.status === 'resigned' && payload.winner === winner;
+  }
+  if (item.kind === 'draw') return payload.status === 'draw'
+    && decodePacket<DrawPayload>(item.wire).payload.response === 'accept';
+  return false;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -527,10 +542,10 @@ export function useMeshChess(): MeshChessApi {
           const delivered = new Set([acknowledged.packetId]);
           if (acknowledged.kind === 'sync') {
             const synced = decodePacket<SyncPayload>(acknowledged.wire);
-            // An acknowledged history also delivers the moves it contains.
-            const moveIds = new Set(synced.payload.moves.map((move) => move.packetId));
+            const game = latest.games.find((entry) => entry.id === acknowledged.gameId);
+            // A confirmed snapshot also delivers the moves and result it contains.
             for (const item of latest.outbox) {
-              if (item.gameId === acknowledged.gameId && item.kind === 'move' && moveIds.has(item.packetId)) {
+              if (game && item.gameId === game.id && syncConfirms(item, synced.payload, game)) {
                 delivered.add(item.packetId);
               }
             }
@@ -561,21 +576,23 @@ export function useMeshChess(): MeshChessApi {
           || !validateHistory(payload.moves) || !validResult(payload.status, payload.winner)) break;
         const moves = payload.moves;
         const status = payload.status;
+        const snapshot: SyncPayload = { moves, status, winner: payload.winner };
         const differs = payload.moves.length !== game.moves.length
           || payload.moves.some((move, index) => move.packetId !== game.moves[index]?.packetId || move.fen !== game.moves[index]?.fen);
         commit((latest) => {
           const delivered = new Set(latest.outbox.filter((item) => item.gameId === game.id
-            && (item.kind === 'accept' || (item.kind === 'move' && moves.some((move, index) => (
-              move.packetId === item.packetId && move.fen === game.moves[index]?.fen
-            ))))).map((item) => item.packetId));
+            && syncConfirms(item, snapshot, game)).map((item) => item.packetId));
           const updated = replaceGame(latest, game.id, (value) => ({
             ...value,
             ...(moves.length > value.moves.length || (moves.length === value.moves.length && differs) ? {
               moves,
-              status,
-              winner: payload.winner,
               drawOffer: null,
               updatedAt: Date.now(),
+            } : {}),
+            ...(moves.length >= value.moves.length && value.status === 'active' ? {
+              status,
+              winner: payload.winner,
+              ...(status !== 'active' ? { drawOffer: null, updatedAt: Date.now() } : {}),
             } : {}),
             awaitingAck: value.awaitingAck && delivered.has(value.awaitingAck) ? null : value.awaitingAck,
           }));
@@ -583,7 +600,9 @@ export function useMeshChess(): MeshChessApi {
         });
         sendAck(incoming);
         // Never roll back an undelivered local move to the peer's older board.
-        if (moves.length < game.moves.length) sendSync(game, incoming.from.id);
+        if (moves.length < game.moves.length || (game.status !== 'active' && status === 'active')) {
+          sendSync(stateRef.current.games.find((entry) => entry.id === game.id) ?? game, incoming.from.id);
+        }
         break;
       }
       case 'chat': {
@@ -689,7 +708,7 @@ export function useMeshChess(): MeshChessApi {
     updateTransport(OFFLINE_TRANSPORT);
   }, [updateTransport]);
 
-  const connect = useCallback(async (kind: TransportKind): Promise<void> => {
+  const connect = useCallback(async (kind: TransportKind, chooseNewDevice = false): Promise<void> => {
     await disconnect();
     const connection = ++connectionRef.current;
     updateTransport({ kind, status: 'connecting', detail: kind === 'demo' ? 'Opening demo channel' : 'Connecting radio' });
@@ -726,7 +745,8 @@ export function useMeshChess(): MeshChessApi {
     const adapter = kind === 'serial' ? new SerialAdapter(callbacks) : new BLEAdapter(callbacks);
     adapterRef.current = adapter;
     try {
-      await adapter.connect();
+      if (adapter instanceof BLEAdapter) await adapter.connect(undefined, chooseNewDevice);
+      else await adapter.connect();
       if (connectionRef.current !== connection) {
         await adapter.disconnect().catch(() => undefined);
         return;

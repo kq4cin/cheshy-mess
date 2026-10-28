@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, ArrowRight, Bluetooth, Check, CheckCheck, ChevronDown, Circle,
   Clock3, Copy, Download, Flag, Gamepad2, Handshake, Inbox, Info, Menu,
-  MessageCircle, MoreHorizontal, Plus, Radio, RefreshCw, RotateCcw, Send,
+  MessageCircle, Plus, Radio, RefreshCw, RotateCcw, Send,
   Settings, ShieldCheck, Signal, Swords, Trash2, Trophy, Usb, Users, WifiOff, X,
 } from 'lucide-react';
 import { ChessBoard } from './components/ChessBoard';
@@ -31,6 +31,7 @@ function resultLabel(game: Game) {
   if (game.status === 'checkmate') return `${game.winner === 'w' ? 'White' : 'Black'} wins by checkmate`;
   if (game.status === 'resigned') return `${game.winner === 'w' ? 'White' : 'Black'} wins by resignation`;
   if (game.status === 'stalemate') return 'Draw by stalemate';
+  if (game.status === 'aborted') return 'Game cancelled';
   return 'Game drawn';
 }
 
@@ -110,8 +111,8 @@ function App() {
   const copy = async (text: string, message: string) => {
     try { await navigator.clipboard.writeText(text); notify(message); } catch { notify('Clipboard unavailable'); }
   };
-  const connect = async (kind: TransportKind) => {
-    try { await mesh.connect(kind); notify(kind === 'demo' ? 'Local demo connected' : 'MeshCore radio connected'); }
+  const connect = async (kind: TransportKind, chooseNewDevice = false) => {
+    try { await mesh.connect(kind, chooseNewDevice); notify(kind === 'demo' ? 'Local demo connected' : 'MeshCore radio connected'); }
     catch (error) { notify(error instanceof Error ? error.message : 'Could not connect'); }
   };
   const submitChat = () => {
@@ -173,24 +174,24 @@ function App() {
           <div className="player-strip opponent-strip">
             <span className="player-avatar">{opponent.name.slice(0, 1).toUpperCase()}<i className={onlinePeers.some((p) => p.id === opponent.id) ? 'online' : ''} /></span>
             <div><strong>{opponent.name}</strong><span><span className="tiny-dot" />{onlinePeers.some((p) => p.id === opponent.id) ? 'Recently on mesh' : 'Asynchronous opponent'}</span></div>
-            <div className="player-strip-right"><span className="color-label">{game.localColor === 'w' ? 'BLACK' : 'WHITE'}</span><button className="icon-button"><MoreHorizontal size={20} /></button></div>
+            <div className="player-strip-right"><span className="color-label">{game.localColor === 'w' ? 'BLACK' : 'WHITE'}</span><button className="icon-button" aria-label="Remove game" onClick={() => setConfirm('delete')}><Trash2 size={20} /></button></div>
           </div>
           <div className="board-frame"><ChessBoard moves={game.moves} localColor={game.localColor} interactive={myTurn} orientation={orientation} onMove={(input) => mesh.playMove(game.id, input)} reviewPly={reviewPly} onReviewEnd={() => setReviewPly(null)} /></div>
           <div className="player-strip local-strip">
             <span className="player-avatar local">{state.profile.name.slice(0, 1).toUpperCase()}</span>
             <div><strong>{state.profile.name} <span className="you-tag">YOU</span></strong><span>{game.localColor === 'w' ? 'White pieces' : 'Black pieces'}</span></div>
-            <div className="player-strip-right">{game.awaitingAck && <span className="delivery-label"><RefreshCw size={13} />Delivering move</span>}<span className="color-label">{game.localColor === 'w' ? 'WHITE' : 'BLACK'}</span></div>
+            <div className="player-strip-right">{game.awaitingAck && <button className="delivery-label" onClick={() => { mesh.requestSync(game.id); notify('Sync requested'); }} title="Retry pending game update"><RefreshCw size={13} />{game.status === 'active' ? 'Delivering move' : 'Confirming result'}</button>}<span className="color-label">{game.localColor === 'w' ? 'WHITE' : 'BLACK'}</span></div>
           </div>
           <div className={`turn-banner ${myTurn ? 'your-turn' : ''}`}>
             <span className="turn-icon">{game.status !== 'active' ? <Trophy size={18} /> : myTurn ? <Swords size={18} /> : <Clock3 size={18} />}</span>
-            <div><strong>{resultLabel(game) || (myTurn ? 'Your move' : `${opponent.name}’s move`)}</strong><span>{game.status !== 'active' ? 'Thanks for playing on Cheshy Mess' : myTurn ? 'Take your time. The mesh will wait.' : 'You’ll find their move here when you return.'}</span></div>
+            <div><strong>{resultLabel(game) || (myTurn ? 'Your move' : `${opponent.name}’s move`)}</strong><span>{game.status !== 'active' ? 'Game over. Start a new game or remove this one.' : myTurn ? 'Take your time. The mesh will wait.' : 'You’ll find their move here when you return.'}</span></div>
             <span className="no-clock"><WifiOff size={14} />No clock</span>
             {game.drawOffer && game.drawOffer.by !== state.profile.id && <div className="mobile-draw-actions"><span>Draw offer</span><button onClick={() => mesh.respondDraw(game.id, 'accept')}>Accept</button><button onClick={() => mesh.respondDraw(game.id, 'decline')}>Decline</button></div>}
           </div>
           <div className="board-toolbar">
             <button onClick={() => setOrientation(orientation === 'w' ? 'b' : 'w')}><RotateCcw size={16} />Flip board</button>
             <button onClick={() => { setSideTab('chat'); setMobileChatOpen(true); }}><MessageCircle size={16} />Chat{unread(game.id) > 0 && <i />}</button>
-            <button onClick={() => setConfirm('resign')} disabled={game.status !== 'active'}><Flag size={16} />Resign</button>
+            {game.status === 'active' ? <button onClick={() => setConfirm('resign')}><Flag size={16} />Resign</button> : <button onClick={() => setNewGameOpen(true)}><Plus size={16} />New game</button>}
           </div>
         </> : <div className="welcome-board">
           <div className="welcome-art"><span>♞</span><i className="signal-one" /><i className="signal-two" /><i className="signal-three" /></div>
@@ -240,6 +241,7 @@ function App() {
         <ConnectionCard icon={<Gamepad2 />} title="Local demo" description="Two browser tabs. No radio needed." active={mesh.transport.kind === 'demo' && mesh.transport.status === 'connected'} action={mesh.transport.kind === 'demo' && mesh.transport.status === 'connected' ? 'Connected' : 'Try demo'} onClick={() => void connect('demo')} />
         <ConnectionCard icon={<Usb />} title="USB Serial" description="MeshCore companion · 115200 baud" active={mesh.transport.kind === 'serial' && mesh.transport.status === 'connected'} action="Connect radio" onClick={() => void connect('serial')} disabled={!supportsSerial()} note={!supportsSerial() ? 'Requires Chrome or Edge on desktop/Android' : undefined} />
         <ConnectionCard icon={<Bluetooth />} title="Bluetooth LE" description="Wireless MeshCore companion" active={mesh.transport.kind === 'ble' && mesh.transport.status === 'connected'} action="Connect Bluetooth" onClick={() => void connect('ble')} disabled={!supportsBluetooth()} note={!supportsBluetooth() ? 'Web Bluetooth is not available in this browser' : undefined} />
+        {supportsBluetooth() && <button className="text-button" onClick={() => void connect('ble', true)}>Choose another Bluetooth radio</button>}
         {mesh.transport.status === 'connected' && <button className="disconnect-button" onClick={() => void mesh.disconnect()}>Disconnect {mesh.transport.kind === 'demo' ? 'demo' : 'radio'}</button>}
       </section><aside className="surface channel-card"><div className="section-heading"><h2><Signal size={20} />Channel</h2></div><div className="channel-name">#chess<span>PUBLIC HASHTAG CHANNEL</span></div><dl><div><dt>Status</dt><dd>{mesh.transport.detail}</dd></div><div><dt>Channel slot</dt><dd>{mesh.transport.channel ?? 'Automatic'}</dd></div><div><dt>Queued packets</dt><dd>{state.outbox.length}</dd></div><div><dt>Protocol</dt><dd>MeshCore companion v3</dd></div></dl><div className="security-note"><Info size={17} /><p>Public channels are not private or authenticated. Only Cheshy Mess packets on this channel are processed; other messages are ignored.</p></div></aside></div>
       <section className="surface radio-log"><div className="section-heading"><h2>Connection activity</h2><span>{mesh.logs.length} events</span></div>{mesh.logs.length ? [...mesh.logs].reverse().map((log) => <div key={log.id}><time>{new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><span>{log.text}</span></div>) : <p className="muted-copy">Connection and packet activity will appear here.</p>}</section>
@@ -251,7 +253,7 @@ function App() {
 
     {settingsOpen && <Modal title="Your Cheshy Mess" onClose={() => setSettingsOpen(false)}><label className="field-label" htmlFor="profile-name">DISPLAY NAME</label><input id="profile-name" className="text-input" maxLength={24} value={state.profile.name} onChange={(e) => mesh.updateName(e.target.value)} onBlur={() => mesh.updateName(state.profile.name)} /><p className="field-help">This name is visible to other players on the public channel.</p><div className="settings-info"><span>Player ID</span><button onClick={() => copy(state.profile.id, 'Player ID copied')}>{state.profile.id.slice(0, 20)}…<Copy size={13} /></button></div>{installPrompt && <button className="secondary-button full-button" onClick={() => void installPrompt.prompt()}><Download size={17} />Install Cheshy Mess app</button>}<div className="settings-about"><span className="brand-mark">♞</span><div><strong>Cheshy Mess 1.0</strong><p>Offline-first correspondence chess.<br />Open protocol. No account. No server.</p></div></div></Modal>}
 
-    {confirm && game && <Modal title={confirm === 'resign' ? 'Resign this game?' : 'Remove this game?'} onClose={() => setConfirm(null)}><p className="confirm-copy">{confirm === 'resign' ? `This will end your game with ${opponent?.name}. Your opponent will be declared the winner.` : 'This only removes the local copy. The other player keeps their game.'}</p><div className="modal-button-row"><button className="secondary-button" onClick={() => setConfirm(null)}>Cancel</button><button className="danger-button" onClick={() => { if (confirm === 'resign') mesh.resign(game.id); else { mesh.deleteLocalGame(game.id); setSelectedId(null); } setConfirm(null); }}>{confirm === 'resign' ? <Flag size={16} /> : <Trash2 size={16} />}{confirm === 'resign' ? 'Resign game' : 'Remove game'}</button></div></Modal>}
+    {confirm && game && <Modal title={confirm === 'resign' ? 'Resign this game?' : 'Remove this game?'} onClose={() => setConfirm(null)}><p className="confirm-copy">{confirm === 'resign' ? `This will end your game with ${opponent?.name}. Your opponent will be declared the winner.` : 'This removes the game, its chat, and queued packets from this device only. It does not resign or remove the other player’s game.'}</p><div className="modal-button-row"><button className="secondary-button" onClick={() => setConfirm(null)}>Cancel</button><button className="danger-button" onClick={() => { if (confirm === 'resign') mesh.resign(game.id); else { mesh.deleteLocalGame(game.id); setSelectedId(null); setMobileChatOpen(false); setReviewPly(null); } setConfirm(null); }}>{confirm === 'resign' ? <Flag size={16} /> : <Trash2 size={16} />}{confirm === 'resign' ? 'Resign game' : 'Remove game'}</button></div></Modal>}
     {toast && <div className="toast" role="status"><Check size={17} />{toast}</div>}
   </div>;
 }

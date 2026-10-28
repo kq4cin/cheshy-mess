@@ -1,4 +1,105 @@
 import { expect, test } from '@playwright/test';
+import { encodePacket } from '../src/lib/protocol';
+import type { PersistedState } from '../src/types';
+
+for (const droppedKind of ['resign', 'ack'] as const) {
+  test(`mobile resignation recovers a lost ${droppedKind} and a finished game can be removed`, async ({ context }) => {
+    await context.addInitScript(() => {
+      const postMessage = BroadcastChannel.prototype.postMessage;
+      BroadcastChannel.prototype.postMessage = function (message: unknown) {
+        if (typeof message === 'string' && message.startsWith('MC2:')) {
+          const packet = JSON.parse(message.slice(4)) as { K?: string };
+          if (packet.K === sessionStorage.getItem('drop-packet-kind')) return;
+        }
+        postMessage.call(this, message);
+      };
+    });
+    const white = await context.newPage();
+    const black = await context.newPage();
+    await Promise.all([white.goto('/'), black.goto('/')]);
+    await Promise.all([white.waitForSelector('.welcome-board'), black.waitForSelector('.welcome-board')]);
+    await white.getByRole('button', { name: 'Start a new game' }).click();
+    await white.getByRole('button', { name: '♔ White' }).click();
+    await white.getByRole('button', { name: 'Post challenge to mesh' }).click();
+    await black.getByRole('button', { name: /^Lobby/ }).click();
+    await black.getByRole('button', { name: /^Accept/ }).click();
+    await expect(black.getByText('Board synchronized')).toBeVisible();
+    await (droppedKind === 'resign' ? black : white).evaluate((kind) => {
+      sessionStorage.setItem('drop-packet-kind', kind);
+    }, droppedKind);
+    await black.setViewportSize({ width: 390, height: 844 });
+    await black.getByRole('button', { name: 'Resign', exact: true }).click();
+    await black.getByRole('button', { name: 'Resign game', exact: true }).click();
+    await expect(black.locator('.turn-banner')).toContainText('White wins by resignation');
+    await expect(black.getByRole('button', { name: 'New game', exact: true })).toBeVisible();
+    await black.getByRole('button', { name: 'New game', exact: true }).click();
+    await expect(black.getByRole('dialog', { name: 'Create a new game' })).toBeVisible();
+    await black.getByRole('button', { name: 'Close dialog' }).click();
+    await expect(black.getByText('Delivering move')).toHaveCount(0);
+    await black.getByTitle('Retry pending game update').click();
+    await expect(black.getByText('Confirming result')).toHaveCount(0);
+    await white.getByRole('button', { name: /^My games/ }).click();
+    await expect(white.locator('.turn-banner')).toContainText('White wins by resignation');
+    await expect(black.getByRole('button', { name: /^e7, black pawn/ })).toBeDisabled();
+    await expect(black.getByRole('button', { name: /^e5, legal move/ })).toHaveCount(0);
+    await black.getByRole('button', { name: 'Remove game', exact: true }).click();
+    await black.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(black.locator('.turn-banner')).toContainText('White wins by resignation');
+    await black.getByRole('button', { name: 'Remove game', exact: true }).click();
+    await black.getByRole('dialog').getByRole('button', { name: 'Remove game', exact: true }).click();
+    await expect(black.locator('.welcome-board')).toBeVisible();
+    await black.reload();
+    await expect(black.locator('.welcome-board')).toBeVisible();
+    expect(await black.evaluate(() => document.body.scrollWidth)).toBe(390);
+  });
+}
+
+test('removing an active offline game clears its saved chat and queued packets', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForSelector('.welcome-board');
+  await page.evaluate((wire) => {
+    const channel = new BroadcastChannel('meshchess-demo-v1');
+    channel.postMessage(wire);
+    channel.close();
+  }, encodePacket({
+    v: 1, id: 'test-challenge', kind: 'challenge', from: { id: 'remote', name: 'Remote player' },
+    payload: { challengeId: 'offline-challenge', hostColor: 'b' }, sentAt: Date.now(),
+  }));
+  await page.getByRole('button', { name: /^Lobby/ }).click();
+  await page.getByRole('button', { name: /^Accept/ }).click();
+  await page.getByRole('button', { name: /^e2, white pawn/ }).click();
+  await page.getByRole('button', { name: /^e4, legal move/ }).click();
+  await page.locator('.board-toolbar').getByRole('button', { name: 'Chat' }).click();
+  await page.getByRole('textbox', { name: 'Chat message' }).fill('Queued message');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await page.locator('.connection-pill').click();
+  await page.getByRole('button', { name: 'Disconnect demo' }).click();
+  await page.getByRole('button', { name: /^My games/ }).click();
+  await page.getByRole('button', { name: 'Remove game', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove game', exact: true }).click();
+  await expect(page.locator('.welcome-board')).toBeVisible();
+  await page.reload();
+  await expect(page.locator('.welcome-board')).toBeVisible();
+  const saved = await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('meshchess', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      return await new Promise<PersistedState>((resolve, reject) => {
+        const request = database.transaction('state', 'readonly').objectStore('state').get('current');
+        request.onsuccess = () => resolve(request.result as PersistedState);
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      database.close();
+    }
+  });
+  expect(saved.games).toEqual([]);
+  expect(saved.chats).toEqual([]);
+  expect(saved.outbox.filter((item) => item.gameId)).toEqual([]);
+});
 
 for (const droppedKind of ['move', 'ack'] as const) {
   test(`state sync recovers a lost ${droppedKind} without leaving the move delivering`, async ({ context }) => {

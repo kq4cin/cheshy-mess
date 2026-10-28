@@ -711,6 +711,7 @@ interface BluetoothGattLike {
 }
 
 export interface BluetoothDeviceLike {
+  id?: string;
   gatt?: BluetoothGattLike;
   addEventListener?(type: string, listener: () => void): void;
   removeEventListener?(type: string, listener: () => void): void;
@@ -718,7 +719,11 @@ export interface BluetoothDeviceLike {
 
 interface BluetoothNavigator {
   requestDevice(options: unknown): Promise<BluetoothDeviceLike>;
+  getDevices?(): Promise<BluetoothDeviceLike[]>;
 }
+
+const BLUETOOTH_DEVICE_KEY = 'meshchess-bluetooth-device';
+let rememberedBluetoothDevice: BluetoothDeviceLike | null = null;
 
 export class BLEAdapter implements Transport {
   private device: BluetoothDeviceLike | null = null;
@@ -739,11 +744,21 @@ export class BLEAdapter implements Transport {
     private readonly options: MeshCoreOptions = {},
   ) {}
 
-  async connect(device?: BluetoothDeviceLike): Promise<void> {
+  async connect(device?: BluetoothDeviceLike, chooseNewDevice = false): Promise<void> {
     this.emit('connecting', 'Opening Bluetooth radio');
     try {
       const bluetooth = (globalThis.navigator as Navigator & { bluetooth?: BluetoothNavigator } | undefined)?.bluetooth;
-      this.device = device ?? await bluetooth?.requestDevice({
+      if (!bluetooth && !device) throw new Error('Web Bluetooth is unavailable');
+      let previous = chooseNewDevice ? null : rememberedBluetoothDevice;
+      if (!device && !chooseNewDevice && !previous && bluetooth?.getDevices) {
+        try {
+          const id = globalThis.localStorage?.getItem(BLUETOOTH_DEVICE_KEY);
+          if (id) previous = (await bluetooth.getDevices()).find((entry) => entry.id === id) ?? null;
+        } catch (error) {
+          this.callbacks.onLog?.(`Could not restore Bluetooth selection: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      this.device = device ?? previous ?? await bluetooth?.requestDevice({
         filters: [{ services: [NORDIC_UART_SERVICE] }, { namePrefix: 'MeshCore' }],
         optionalServices: [NORDIC_UART_SERVICE],
       }) ?? null;
@@ -762,6 +777,12 @@ export class BLEAdapter implements Transport {
         else throw new Error('Bluetooth UART RX characteristic is not writable');
       }, this.callbacks, this.options);
       await this.client.start();
+      rememberedBluetoothDevice = this.device;
+      try {
+        if (this.device.id) globalThis.localStorage?.setItem(BLUETOOTH_DEVICE_KEY, this.device.id);
+      } catch (error) {
+        this.callbacks.onLog?.(`Could not remember Bluetooth selection: ${error instanceof Error ? error.message : String(error)}`);
+      }
       this.emit('connected', 'Bluetooth radio connected', this.client.channelIndex ?? undefined);
     } catch (error) {
       await this.close();
