@@ -20,15 +20,17 @@ import type {
   ResultEntry,
   ResultPayload,
   SyncPayload,
+  SyncRequestPayload,
   TransportKind,
   TransportState,
 } from '../types';
-import { gameResult, makeMove, validateHistory } from '../lib/chess';
+import { buildSyncPayload, currentFen, gameResult, makeMove, restoreSyncHistory, validateHistory } from '../lib/chess';
 import { decodePacket, encodePacket, GAME_CHANNEL, uniqueId } from '../lib/protocol';
 import { createDefaultState, loadState, saveState } from '../lib/storage';
 import { BLEAdapter, radioMessageCount, SerialAdapter } from '../lib/transports';
 import type { Transport } from '../lib/transports';
 import { onServiceWorkerMessage } from '../sw-events';
+import { isRadioDeliveryPaused, recordOutboxAttempt, retryPausedOutboxItems, shouldSendOutboxItem } from '../lib/outbox';
 
 const CHANNEL_NAME = 'meshchess-demo-v1';
 const RELIABLE_KINDS = new Set<PacketKind>(['move', 'accept', 'sync', 'draw', 'resign', 'rematch', 'chat']);
@@ -52,6 +54,7 @@ export interface MeshChessApi {
   respondDraw(gameId: string, response: 'accept' | 'decline'): void;
   sendChat(gameId: string | null, text: string): void;
   requestSync(gameId: string): void;
+  retryPausedPackets(): void;
   markRead(gameId: string): void;
   deleteLocalGame(gameId: string): void;
 }
@@ -256,36 +259,41 @@ export function useMeshChess(): MeshChessApi {
     const run = flushTailRef.current.then(async () => {
       const active = transportRef.current;
       if (active.status !== 'connected' || !active.kind) return;
+      const kind = active.kind;
       const items = stateRef.current.outbox;
       let sentAny = false;
       for (const item of items) {
         const current = stateRef.current.outbox.find((candidate) => candidate.id === item.id);
         if (!current) continue;
-        const retryBase = active.kind === 'demo' ? 10_000 : 30_000;
-        const retryAfter = Math.min(300_000, retryBase * 2 ** Math.min(Math.max(current.attempts - 1, 0), 5));
-        if (current.lastAttempt > 0 && Date.now() - current.lastAttempt < retryAfter) continue;
+        if (!shouldSendOutboxItem(current, active.kind, Date.now())) continue;
         if (sentAny) await delay(active.kind === 'demo' ? 300 : 1200);
 
         commit((latest) => ({
           ...latest,
           outbox: latest.outbox.map((entry) => entry.id === current.id
-            ? { ...entry, attempts: entry.attempts + 1, lastAttempt: Date.now() }
+            ? recordOutboxAttempt(entry, kind, Date.now())
             : entry),
         }));
         try {
+          const wire = active.kind === 'demo' ? current.wire : encodePacket(decodePacket(current.wire));
+          if (wire !== current.wire) {
+            commit((latest) => ({
+              ...latest, outbox: latest.outbox.map((entry) => entry.id === current.id ? { ...entry, wire } : entry),
+            }));
+          }
           if (active.kind === 'demo') {
             const channel = channelRef.current;
             if (!channel) throw new Error('Demo channel is not open');
-            channel.postMessage(current.wire);
+            channel.postMessage(wire);
           } else {
             const adapter = adapterRef.current;
             if (!adapter) throw new Error('Radio is not connected');
-            await adapter.send(current.wire);
+            await adapter.send(wire);
           }
           sentAny = true;
           addLog(active.kind === 'demo'
             ? `Sent ${current.kind}`
-            : `Sent ${current.kind} (${radioMessageCount(current.wire)} radio message${radioMessageCount(current.wire) === 1 ? '' : 's'})`);
+            : `Sent ${current.kind} (${radioMessageCount(wire)} radio message${radioMessageCount(wire) === 1 ? '' : 's'})`);
           commit((latest) => {
             const exists = latest.outbox.some((entry) => entry.id === current.id);
             if (!exists) return latest;
@@ -302,6 +310,9 @@ export function useMeshChess(): MeshChessApi {
           });
         } catch (error) {
           addLog(`Send ${current.kind}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (active.kind !== 'demo' && stateRef.current.outbox.some((entry) => entry.id === current.id && isRadioDeliveryPaused(entry))) {
+          addLog(`Paused ${current.kind}: automatic radio attempts exhausted; retry manually in Mesh`);
         }
       }
     });
@@ -330,6 +341,8 @@ export function useMeshChess(): MeshChessApi {
       createdAt: now,
       attempts: 0,
       lastAttempt: 0,
+      radioAttempts: 0,
+      radioLastAttempt: 0,
     };
     commit((latest) => {
       const coalesces = outgoing.kind === 'sync' || outgoing.kind === 'sync-request';
@@ -378,16 +391,17 @@ export function useMeshChess(): MeshChessApi {
   }, [commit]);
 
   const sendSyncRequest = useCallback((gameId: string, to: string) => {
-    enqueueRef.current(packet('sync-request', stateRef.current.profile, {}, { gameId, to }), false);
+    const game = stateRef.current.games.find((entry) => entry.id === gameId);
+    if (!game) return;
+    const payload: SyncRequestPayload = {
+      moveCount: game.moves.length, fen: currentFen(game.moves), packetId: game.moves.at(-1)?.packetId,
+    };
+    enqueueRef.current(packet('sync-request', stateRef.current.profile, payload, { gameId, to }), false);
   }, []);
 
-  const sendSync = useCallback((game: Game, to: string) => {
+  const sendSync = useCallback((game: Game, to: string, request?: Partial<SyncRequestPayload>) => {
     if (!validateHistory(game.moves)) return;
-    const payload: SyncPayload = {
-      moves: game.moves,
-      status: game.status,
-      ...(game.winner ? { winner: game.winner } : {}),
-    };
+    const payload = buildSyncPayload(game, request);
     const outgoing = packet('sync', stateRef.current.profile, payload, { gameId: game.id, to });
     commit((latest) => replaceGame(latest, game.id, (current) => ({ ...current, awaitingAck: outgoing.id })));
     enqueueRef.current(outgoing);
@@ -543,9 +557,10 @@ export function useMeshChess(): MeshChessApi {
           if (acknowledged.kind === 'sync') {
             const synced = decodePacket<SyncPayload>(acknowledged.wire);
             const game = latest.games.find((entry) => entry.id === acknowledged.gameId);
+            const moves = game ? restoreSyncHistory(synced.payload, game.moves) : null;
             // A confirmed snapshot also delivers the moves and result it contains.
             for (const item of latest.outbox) {
-              if (game && item.gameId === game.id && syncConfirms(item, synced.payload, game)) {
+              if (game && moves && item.gameId === game.id && syncConfirms(item, { ...synced.payload, moves }, game)) {
                 delivered.add(item.packetId);
               }
             }
@@ -565,7 +580,9 @@ export function useMeshChess(): MeshChessApi {
       case 'sync-request': {
         if (incoming.to !== me.id || !incoming.gameId) break;
         const game = stateRef.current.games.find((entry) => entry.id === incoming.gameId);
-        if (game && opponent(game, me.id).id === incoming.from.id) sendSync(game, incoming.from.id);
+        if (game && opponent(game, me.id).id === incoming.from.id) {
+          sendSync(game, incoming.from.id, isObject(incoming.payload) ? incoming.payload : undefined);
+        }
         break;
       }
       case 'sync': {
@@ -573,12 +590,17 @@ export function useMeshChess(): MeshChessApi {
         const game = current.games.find((entry) => entry.id === incoming.gameId);
         const payload = incoming.payload as Partial<SyncPayload>;
         if (!game || opponent(game, me.id).id !== incoming.from.id
-          || !validateHistory(payload.moves) || !validResult(payload.status, payload.winner)) break;
-        const moves = payload.moves;
+          || !validResult(payload.status, payload.winner)) break;
+        const moves = restoreSyncHistory(payload, game.moves);
+        if (!moves) {
+          addLog(`Rejected sync from ${incoming.from.name}: invalid history or mismatched base`);
+          sendSyncRequest(game.id, incoming.from.id);
+          break;
+        }
         const status = payload.status;
         const snapshot: SyncPayload = { moves, status, winner: payload.winner };
-        const differs = payload.moves.length !== game.moves.length
-          || payload.moves.some((move, index) => move.packetId !== game.moves[index]?.packetId || move.fen !== game.moves[index]?.fen);
+        const differs = moves.length !== game.moves.length
+          || moves.some((move, index) => move.packetId !== game.moves[index]?.packetId || move.fen !== game.moves[index]?.fen);
         commit((latest) => {
           const delivered = new Set(latest.outbox.filter((item) => item.gameId === game.id
             && syncConfirms(item, snapshot, game)).map((item) => item.packetId));
@@ -601,7 +623,8 @@ export function useMeshChess(): MeshChessApi {
         sendAck(incoming);
         // Never roll back an undelivered local move to the peer's older board.
         if (moves.length < game.moves.length || (game.status !== 'active' && status === 'active')) {
-          sendSync(stateRef.current.games.find((entry) => entry.id === game.id) ?? game, incoming.from.id);
+          sendSync(stateRef.current.games.find((entry) => entry.id === game.id) ?? game, incoming.from.id,
+            { moveCount: moves.length, fen: currentFen(moves), packetId: moves.at(-1)?.packetId });
         }
         break;
       }
@@ -988,6 +1011,17 @@ export function useMeshChess(): MeshChessApi {
     if (game) sendSyncRequest(gameId, opponent(game, current.profile.id).id);
   }, [sendSyncRequest]);
 
+  const retryPausedPackets = useCallback(() => {
+    const active = transportRef.current;
+    if (active.status !== 'connected' || !active.kind || active.kind === 'demo') {
+      addLog('Manual retry: connect a radio first');
+      return;
+    }
+    commit((latest) => ({ ...latest, outbox: retryPausedOutboxItems(latest.outbox) }), () => {
+      void flushRef.current();
+    });
+  }, [addLog, commit]);
+
   const markRead = useCallback((gameId: string) => {
     commit((latest) => replaceGame(latest, gameId, (game) => ({ ...game, lastReadAt: Date.now() })));
   }, [commit]);
@@ -1018,6 +1052,7 @@ export function useMeshChess(): MeshChessApi {
     respondDraw,
     sendChat,
     requestSync,
+    retryPausedPackets,
     markRead,
     deleteLocalGame,
   };

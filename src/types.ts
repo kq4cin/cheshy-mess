@@ -67,6 +67,8 @@ export interface OutboxItem {
   createdAt: number;
   attempts: number;
   lastAttempt: number;
+  radioAttempts?: number;
+  radioLastAttempt?: number;
 }
 export interface PersistedState {
   profile: Profile;
@@ -94,7 +96,8 @@ export interface ChallengePayload { challengeId: string; hostColor: Color | 'ran
 export interface AcceptPayload { challengeId: string; gameId: string; white: Player; black: Player }
 export interface MovePayload { n: number; from: string; to: string; promotion?: string; san: string; fen?: string }
 export interface AckPayload { packetId: string; gameId?: string; moveCount: number }
-export interface SyncPayload { moves: MoveRecord[]; status: GameStatus; winner?: Color }
+export interface SyncPayload { moves: MoveRecord[]; status: GameStatus; winner?: Color; base?: number; baseFen?: string; basePacketId?: string }
+export interface SyncRequestPayload { moveCount: number; fen: string; packetId?: string }
 export interface ChatPayload { text: string }
 export interface DrawPayload { response?: 'accept' | 'decline'; offerId?: string }
 export interface ResultPayload { white: string; black: string; outcome: 'white' | 'black' | 'draw'; reason: GameStatus }

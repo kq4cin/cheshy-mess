@@ -1,5 +1,5 @@
 import { Chess } from 'chess.js';
-import type { Color, GameStatus, MoveRecord } from '../types';
+import type { Color, Game, GameStatus, MoveRecord, SyncPayload, SyncRequestPayload } from '../types';
 import { uniqueId } from './protocol';
 
 export interface MoveInput {
@@ -138,3 +138,27 @@ export function validateHistory(moves: unknown): moves is MoveRecord[] {
 }
 
 export const validateMoveHistory = validateHistory;
+
+export function buildSyncPayload(game: Game, request?: Partial<SyncRequestPayload>): SyncPayload {
+  const count = request?.moveCount;
+  const base = typeof count === 'number' && Number.isSafeInteger(count) && count > 0
+    && count <= game.moves.length && game.moves[count - 1].packetId === request?.packetId
+    && currentFen(game.moves.slice(0, count)) === request?.fen ? count : 0;
+  return {
+    moves: game.moves.slice(base),
+    status: game.status,
+    ...(game.winner ? { winner: game.winner } : {}),
+    ...(base > 0 ? {
+      base, baseFen: currentFen(game.moves.slice(0, base)), basePacketId: game.moves[base - 1].packetId,
+    } : {}),
+  };
+}
+
+export function restoreSyncHistory(payload: Partial<SyncPayload>, localMoves: MoveRecord[]): MoveRecord[] | null {
+  const base = payload.base ?? 0;
+  if (!Number.isSafeInteger(base) || base < 0 || base > localMoves.length || !Array.isArray(payload.moves)) return null;
+  if (base > 0 && (currentFen(localMoves.slice(0, base)) !== payload.baseFen
+    || localMoves[base - 1].packetId !== payload.basePacketId)) return null;
+  const moves = [...localMoves.slice(0, base), ...payload.moves];
+  return validateHistory(moves) ? moves : null;
+}

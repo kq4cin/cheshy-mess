@@ -1,6 +1,97 @@
 import { expect, test } from '@playwright/test';
-import { encodePacket } from '../src/lib/protocol';
+import { encodePacket, hashtagKey, PACKET_KINDS } from '../src/lib/protocol';
 import type { PersistedState } from '../src/types';
+
+test('radio retries once after five minutes, stays paused after reload, and allows one manual attempt', async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(({ secret, resignKind }) => {
+    Object.defineProperty(navigator, 'serial', { value: {
+      requestPort: async () => {
+        let reader: ReadableStreamDefaultController<Uint8Array>;
+        const readable = new ReadableStream<Uint8Array>({ start(controller) { reader = controller; } });
+        const writable = new WritableStream<Uint8Array>({
+          write(serial) {
+            const command = serial.subarray(3);
+            let response: Uint8Array;
+            if (command[0] === 0x16) response = Uint8Array.of(13, 3, 0, 1);
+            else if (command[0] === 0x01) response = Uint8Array.of(5);
+            else if (command[0] === 0x1f) {
+              response = new Uint8Array(50);
+              response[0] = 18;
+              response.set(new TextEncoder().encode('#chess'), 2);
+              response.set(secret, 34);
+            } else if (command[0] === 0x0a) response = Uint8Array.of(10);
+            else if (command[0] === 0x03) {
+              const text = new TextDecoder().decode(command.subarray(7));
+              if (text.startsWith('MC3:') && JSON.parse(text.slice(4))[1] === resignKind) {
+                sessionStorage.setItem('radio-sends', String(Number(sessionStorage.getItem('radio-sends') ?? 0) + 1));
+              }
+              response = Uint8Array.of(6);
+            } else throw new Error(`Unexpected mock radio command ${command[0]}`);
+            const frame = new Uint8Array(response.length + 3);
+            frame.set([0x3e, response.length, 0]);
+            frame.set(response, 3);
+            reader.enqueue(frame);
+          },
+        });
+        return { readable, writable, open: async () => {}, close: async () => {} };
+      },
+    } });
+  }, { secret: [...await hashtagKey()], resignKind: PACKET_KINDS.indexOf('resign') });
+  await page.goto('/');
+  await page.waitForSelector('.welcome-board');
+  const wire = encodePacket({
+    v: 1, id: 'resign_1234567890', kind: 'resign',
+    from: { id: 'player_1234567890', name: 'Guest 1234' },
+    to: 'player_0987654321', gameId: 'game_1234567890', payload: {}, sentAt: Date.now(),
+  });
+  await page.evaluate(async (wire) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('meshchess', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction('state', 'readwrite');
+      const store = transaction.objectStore('state');
+      const request = store.get('current');
+      request.onsuccess = () => {
+        const state = request.result as PersistedState;
+        store.put({ ...state, outbox: [{
+          id: 'test-radio', packetId: 'resign_1234567890', kind: 'resign', wire,
+          createdAt: Date.now(), attempts: 0, lastAttempt: 0, radioAttempts: 0, radioLastAttempt: 0,
+        }] }, 'current');
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+  }, wire);
+  await page.reload();
+  await page.waitForSelector('.welcome-board');
+  await page.locator('.connection-pill').click();
+  await page.getByRole('button', { name: 'Connect radio', exact: true }).click();
+  const sends = () => page.evaluate(() => Number(sessionStorage.getItem('radio-sends') ?? 0));
+  await expect.poll(sends).toBe(1);
+  await page.clock.fastForward(299_000);
+  expect(await sends()).toBe(1);
+  await page.clock.fastForward(2000);
+  await expect.poll(sends).toBe(2);
+  await expect(page.getByRole('button', { name: 'Retry 1 paused packet once' })).toBeVisible();
+  await page.clock.fastForward(900_000);
+  expect(await sends()).toBe(2);
+  await page.reload();
+  await page.waitForSelector('.welcome-board');
+  await page.locator('.connection-pill').click();
+  await page.getByRole('button', { name: 'Connect radio', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry 1 paused packet once' })).toBeEnabled();
+  await page.clock.fastForward(900_000);
+  expect(await sends()).toBe(2);
+  await page.getByRole('button', { name: 'Retry 1 paused packet once' }).click();
+  await expect.poll(sends).toBe(3);
+  await page.clock.fastForward(900_000);
+  expect(await sends()).toBe(3);
+});
 
 test('display name supports continuous typing, replacement and persistence', async ({ page }) => {
   await page.goto('/');
@@ -39,16 +130,17 @@ test('display name supports continuous typing, replacement and persistence', asy
 
 for (const droppedKind of ['resign', 'ack'] as const) {
   test(`mobile resignation recovers a lost ${droppedKind} and a finished game can be removed`, async ({ context }) => {
-    await context.addInitScript(() => {
+    await context.addInitScript((kinds) => {
       const postMessage = BroadcastChannel.prototype.postMessage;
       BroadcastChannel.prototype.postMessage = function (message: unknown) {
-        if (typeof message === 'string' && message.startsWith('MC2:')) {
-          const packet = JSON.parse(message.slice(4)) as { K?: string };
-          if (packet.K === sessionStorage.getItem('drop-packet-kind')) return;
+        if (typeof message === 'string' && /^MC[23]:/.test(message)) {
+          const packet = JSON.parse(message.slice(4));
+          const kind = Array.isArray(packet) ? kinds[packet[1]] : packet.K;
+          if (kind === sessionStorage.getItem('drop-packet-kind')) return;
         }
         postMessage.call(this, message);
       };
-    });
+    }, PACKET_KINDS);
     const white = await context.newPage();
     const black = await context.newPage();
     await Promise.all([white.goto('/'), black.goto('/')]);
@@ -113,9 +205,7 @@ test('removing an active offline game clears its saved chat and queued packets',
   await page.getByRole('button', { name: 'Remove game', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Remove game', exact: true }).click();
   await expect(page.locator('.welcome-board')).toBeVisible();
-  await page.reload();
-  await expect(page.locator('.welcome-board')).toBeVisible();
-  const saved = await page.evaluate(async () => {
+  const readSaved = () => page.evaluate(async () => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open('meshchess', 1);
       request.onsuccess = () => resolve(request.result);
@@ -131,6 +221,10 @@ test('removing an active offline game clears its saved chat and queued packets',
       database.close();
     }
   });
+  await expect.poll(async () => (await readSaved()).games).toEqual([]);
+  await page.reload();
+  await expect(page.locator('.welcome-board')).toBeVisible();
+  const saved = await readSaved();
   expect(saved.games).toEqual([]);
   expect(saved.chats).toEqual([]);
   expect(saved.outbox.filter((item) => item.gameId)).toEqual([]);
@@ -138,17 +232,18 @@ test('removing an active offline game clears its saved chat and queued packets',
 
 for (const droppedKind of ['move', 'ack'] as const) {
   test(`state sync recovers a lost ${droppedKind} without leaving the move delivering`, async ({ context }) => {
-    await context.addInitScript(() => {
+    await context.addInitScript((kinds) => {
       const postMessage = BroadcastChannel.prototype.postMessage;
       BroadcastChannel.prototype.postMessage = function (message: unknown) {
         const dropped = sessionStorage.getItem('drop-packet-kind');
-        if (dropped && typeof message === 'string' && message.startsWith('MC2:')) {
-          const packet = JSON.parse(message.slice(4)) as { K?: string };
-          if (packet.K === dropped) return;
+        if (dropped && typeof message === 'string' && /^MC[23]:/.test(message)) {
+          const packet = JSON.parse(message.slice(4));
+          const kind = Array.isArray(packet) ? kinds[packet[1]] : packet.K;
+          if (kind === dropped) return;
         }
         postMessage.call(this, message);
       };
-    });
+    }, PACKET_KINDS);
     const white = await context.newPage();
     const black = await context.newPage();
     await Promise.all([white.goto('/'), black.goto('/')]);

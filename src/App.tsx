@@ -9,6 +9,7 @@ import { ChessBoard } from './components/ChessBoard';
 import { useMeshChess } from './hooks/useMeshChess';
 import { exportPgn } from './lib/chess';
 import { supportsBluetooth, supportsSerial } from './lib/transports';
+import { isRadioDeliveryPaused } from './lib/outbox';
 import type { Challenge, Color, Game, GameStatus, ResultEntry, TransportKind } from './types';
 
 type View = 'games' | 'lobby' | 'network';
@@ -50,6 +51,7 @@ function feedResultReason(reason: GameStatus) {
 function App() {
   const mesh = useMeshChess();
   const { state } = mesh;
+  const pausedPackets = state.outbox.filter(isRadioDeliveryPaused).length;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>('games');
   const [sideTab, setSideTab] = useState<SideTab>('moves');
@@ -76,6 +78,8 @@ function App() {
     return b.updatedAt - a.updatedAt;
   }), [state.games]);
   const game = sortedGames.find((item) => item.id === selectedId) ?? sortedGames[0] ?? null;
+  const gameDeliveryPaused = mesh.transport.kind !== 'demo'
+    && state.outbox.some((item) => item.packetId === game?.awaitingAck && isRadioDeliveryPaused(item));
   const opponent = game ? opponentOf(game, state.profile.id) : null;
   const myTurn = !!game && game.status === 'active' && (game.moves.length % 2 === 0 ? 'w' : 'b') === game.localColor;
   const unread = (id: string) => state.chats.filter((chat) => chat.gameId === id && !chat.mine && chat.at > (state.games.find((g) => g.id === id)?.lastReadAt ?? 0)).length;
@@ -180,7 +184,7 @@ function App() {
           <div className="player-strip local-strip">
             <span className="player-avatar local">{state.profile.name.slice(0, 1).toUpperCase()}</span>
             <div><strong>{state.profile.name} <span className="you-tag">YOU</span></strong><span>{game.localColor === 'w' ? 'White pieces' : 'Black pieces'}</span></div>
-            <div className="player-strip-right">{game.awaitingAck && <button className="delivery-label" onClick={() => { mesh.requestSync(game.id); notify('Sync requested'); }} title="Retry pending game update"><RefreshCw size={13} />{game.status === 'active' ? 'Delivering move' : 'Confirming result'}</button>}<span className="color-label">{game.localColor === 'w' ? 'WHITE' : 'BLACK'}</span></div>
+            <div className="player-strip-right">{game.awaitingAck && <button className="delivery-label" onClick={() => { mesh.requestSync(game.id); notify('Sync requested'); }} title="Retry pending game update"><RefreshCw size={13} />{gameDeliveryPaused ? 'Delivery paused' : game.status === 'active' ? 'Delivering move' : 'Confirming result'}</button>}<span className="color-label">{game.localColor === 'w' ? 'WHITE' : 'BLACK'}</span></div>
           </div>
           <div className={`turn-banner ${myTurn ? 'your-turn' : ''}`}>
             <span className="turn-icon">{game.status !== 'active' ? <Trophy size={18} /> : myTurn ? <Swords size={18} /> : <Clock3 size={18} />}</span>
@@ -215,7 +219,7 @@ function App() {
             <div className="history-controls"><button onClick={() => setReviewPly(0)} disabled={!game.moves.length} aria-label="First position">|‹</button><button onClick={() => setReviewPly(Math.max(0, (reviewPly ?? game.moves.length) - 1))} disabled={!game.moves.length} aria-label="Previous move"><ArrowLeft size={17} /></button><span>{reviewPly ?? game.moves.length} / {game.moves.length}</span><button onClick={() => { const next = (reviewPly ?? game.moves.length) + 1; setReviewPly(next >= game.moves.length ? null : next); }} disabled={!game.moves.length || reviewPly === null} aria-label="Next move"><ArrowRight size={17} /></button><button onClick={() => setReviewPly(null)} disabled={reviewPly === null} aria-label="Latest position">›|</button></div>
             {game.drawOffer && <div className="draw-offer"><Handshake size={20} /><div><strong>{game.drawOffer.by === state.profile.id ? 'Draw offered' : `${opponent.name} offers a draw`}</strong><p>{game.drawOffer.by === state.profile.id ? 'Waiting for a response.' : 'Do you agree to split the point?'}</p></div>{game.drawOffer.by !== state.profile.id && <div className="draw-actions"><button onClick={() => mesh.respondDraw(game.id, 'accept')}>Accept</button><button onClick={() => mesh.respondDraw(game.id, 'decline')}>Decline</button></div>}</div>}
             <div className="panel-actions"><button onClick={() => mesh.offerDraw(game.id)} disabled={game.status !== 'active' || !!game.drawOffer}><Handshake size={16} />Offer draw</button><button onClick={downloadPgn}><Download size={16} />Export PGN</button></div>
-            <div className="sync-row"><span>{game.awaitingAck ? <><RefreshCw size={13} className="spin" />Awaiting acknowledgement</> : <><CheckCheck size={14} />Board synchronized</>}</span><button onClick={() => mesh.requestSync(game.id)} title="Request state sync"><RefreshCw size={14} /></button></div>
+            <div className="sync-row"><span>{game.awaitingAck ? <><RefreshCw size={13} className={gameDeliveryPaused ? undefined : 'spin'} />{gameDeliveryPaused ? 'Paused - retry in Mesh or request sync' : 'Awaiting acknowledgement'}</> : <><CheckCheck size={14} />Board synchronized</>}</span><button onClick={() => mesh.requestSync(game.id)} title="Request state sync"><RefreshCw size={14} /></button></div>
           </> : <ChatPanel chats={chats} text={chatText} setText={setChatText} send={submitChat} globalChat={globalChat} setGlobalChat={setGlobalChat} hasGame endRef={chatEndRef} />}
           <div className="game-id-row">Game ID <button onClick={() => copy(game.id, 'Game ID copied')}>{game.id.slice(-12)}<Copy size={12} /></button></div>
         </> : <div className="panel-placeholder"><Radio size={28} /><h3>Connected by chess</h3><p>Moves and chat travel directly over your MeshCore network, even when the internet is nowhere to be found.</p><button className="text-button" onClick={() => setView('network')}>Set up your radio <ArrowRight size={15} /></button></div>}
@@ -243,7 +247,10 @@ function App() {
         <ConnectionCard icon={<Bluetooth />} title="Bluetooth LE" description="Wireless MeshCore companion" active={mesh.transport.kind === 'ble' && mesh.transport.status === 'connected'} action="Connect Bluetooth" onClick={() => void connect('ble')} disabled={!supportsBluetooth()} note={!supportsBluetooth() ? 'Web Bluetooth is not available in this browser' : undefined} />
         {supportsBluetooth() && <button className="text-button" onClick={() => void connect('ble', true)}>Choose another Bluetooth radio</button>}
         {mesh.transport.status === 'connected' && <button className="disconnect-button" onClick={() => void mesh.disconnect()}>Disconnect {mesh.transport.kind === 'demo' ? 'demo' : 'radio'}</button>}
-      </section><aside className="surface channel-card"><div className="section-heading"><h2><Signal size={20} />Channel</h2></div><div className="channel-name">#chess<span>PUBLIC HASHTAG CHANNEL</span></div><dl><div><dt>Status</dt><dd>{mesh.transport.detail}</dd></div><div><dt>Channel slot</dt><dd>{mesh.transport.channel ?? 'Automatic'}</dd></div><div><dt>Queued packets</dt><dd>{state.outbox.length}</dd></div><div><dt>Protocol</dt><dd>MeshCore companion v3</dd></div></dl><div className="security-note"><Info size={17} /><p>Public channels are not private or authenticated. Only Cheshy Mess packets on this channel are processed; other messages are ignored.</p></div></aside></div>
+      </section><aside className="surface channel-card"><div className="section-heading"><h2><Signal size={20} />Channel</h2></div><div className="channel-name">#chess<span>PUBLIC HASHTAG CHANNEL</span></div><dl><div><dt>Status</dt><dd>{mesh.transport.detail}</dd></div><div><dt>Channel slot</dt><dd>{mesh.transport.channel ?? 'Automatic'}</dd></div><div><dt>Queued packets</dt><dd>{state.outbox.length}</dd></div><div><dt>Protocol</dt><dd>MeshCore companion v3</dd></div></dl>
+        <p className="muted-copy">Radio packets send once, retry once after five minutes, then pause until you retry manually. Unconfirmed packets stay saved.</p>
+        {mesh.transport.kind !== 'demo' && pausedPackets > 0 && <button className="text-button" disabled={mesh.transport.status !== 'connected'} onClick={mesh.retryPausedPackets}>Retry {pausedPackets} paused packet{pausedPackets === 1 ? '' : 's'} once</button>}
+        <div className="security-note"><Info size={17} /><p>Public channels are not private or authenticated. Only Cheshy Mess packets on this channel are processed; other messages are ignored.</p></div></aside></div>
       <section className="surface radio-log"><div className="section-heading"><h2>Connection activity</h2><span>{mesh.logs.length} events</span></div>{mesh.logs.length ? [...mesh.logs].reverse().map((log) => <div key={log.id}><time>{new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><span>{log.text}</span></div>) : <p className="muted-copy">Connection and packet activity will appear here.</p>}</section>
     </main>}
 
