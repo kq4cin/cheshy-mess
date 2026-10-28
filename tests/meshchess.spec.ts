@@ -2,6 +2,41 @@ import { expect, test } from '@playwright/test';
 import { encodePacket } from '../src/lib/protocol';
 import type { PersistedState } from '../src/types';
 
+test('display name supports continuous typing, replacement and persistence', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForSelector('.welcome-board');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const close = page.getByRole('button', { name: 'Close dialog' });
+  const name = page.getByRole('textbox', { name: 'DISPLAY NAME' });
+  await expect(close).toBeFocused();
+  await name.fill('');
+  await name.pressSequentially('Alice Smith');
+  await expect(name).toBeFocused();
+  await expect(name).toHaveValue('Alice Smith');
+  await name.press('Home');
+  await name.pressSequentially('New ');
+  await expect(name).toHaveValue('New Alice Smith');
+  await name.fill('');
+  await expect(name).toHaveValue('');
+  await name.pressSequentially('Bob Jones');
+  await close.click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(name).toHaveValue('Bob Jones');
+  await name.fill('   ');
+  await close.click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(name).toHaveValue('Bob Jones');
+  await name.fill('  Carol White  ');
+  await name.press('Tab');
+  await expect(name).toHaveValue('Carol White');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.reload();
+  await page.waitForSelector('.welcome-board');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(name).toHaveValue('Carol White');
+});
+
 for (const droppedKind of ['resign', 'ack'] as const) {
   test(`mobile resignation recovers a lost ${droppedKind} and a finished game can be removed`, async ({ context }) => {
     await context.addInitScript(() => {
