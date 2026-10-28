@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { encodePacket, hashtagKey, PACKET_KINDS } from '../src/lib/protocol';
+import { decodePacket, encodePacket, hashtagKey, PACKET_KINDS } from '../src/lib/protocol';
 import type { PersistedState } from '../src/types';
 
 test('mobile game hub filters saved games and returns from move review to a stable board', async ({ page }) => {
@@ -436,6 +436,55 @@ for (const droppedKind of ['move', 'ack'] as const) {
     await expect(white.getByRole('button', { name: /^e5, black pawn, last move/ })).toBeVisible();
   });
 }
+
+test('reannouncing recovers a missed challenge without creating duplicates', async ({ context }) => {
+  const host = await context.newPage();
+  await host.addInitScript((challengeKind) => {
+    const send = BroadcastChannel.prototype.postMessage;
+    BroadcastChannel.prototype.postMessage = function (message: unknown) {
+      if (typeof message === 'string' && message.startsWith('MC3:')
+        && JSON.parse(message.slice(4))[1] === challengeKind) {
+        const wires: string[] = JSON.parse(sessionStorage.getItem('challenge-wires') ?? '[]');
+        wires.push(message);
+        sessionStorage.setItem('challenge-wires', JSON.stringify(wires));
+        if (wires.length === 1) return;
+      }
+      send.call(this, message);
+    };
+  }, PACKET_KINDS.indexOf('challenge'));
+  const guest = await context.newPage();
+  await Promise.all([host.goto('/'), guest.goto('/')]);
+  await Promise.all([host.waitForSelector('.welcome-board'), guest.waitForSelector('.welcome-board')]);
+  await guest.getByRole('button', { name: /^Lobby/ }).click();
+  // Wait for discovery before posting, so it cannot automatically reannounce the lost packet.
+  await host.getByRole('button', { name: /^Lobby/ }).click();
+  await expect(host.locator('.peer-row')).toHaveCount(1);
+  await host.getByRole('button', { name: 'Create game', exact: true }).click();
+  await host.getByRole('button', { name: 'Post challenge to mesh' }).click();
+  await expect(guest.getByRole('button', { name: /^Accept/ })).toHaveCount(0);
+
+  const reannounce = host.getByRole('button', { name: 'Reannounce challenges', exact: true });
+  await reannounce.click();
+  await expect(guest.getByRole('button', { name: /^Accept/ })).toHaveCount(1);
+  await expect(host.getByText('Challenges queued for reannouncement')).toBeVisible();
+  await reannounce.click();
+  await expect.poll(async () => host.evaluate(() => JSON.parse(sessionStorage.getItem('challenge-wires') ?? '[]').length)).toBe(3);
+  const wires: string[] = await host.evaluate(() => JSON.parse(sessionStorage.getItem('challenge-wires') ?? '[]'));
+  const packets = wires.map((wire) => decodePacket<{ challengeId: string }>(wire));
+  expect(new Set(packets.map((packet) => packet.payload.challengeId)).size).toBe(1);
+  expect(new Set(packets.map((packet) => packet.id)).size).toBe(3);
+  await expect(guest.getByRole('button', { name: /^Accept/ })).toHaveCount(1);
+
+  await host.setViewportSize({ width: 390, height: 844 });
+  await expect(reannounce).toBeVisible();
+  expect(await host.evaluate(() => document.body.scrollWidth)).toBe(390);
+  await host.getByRole('navigation', { name: 'Mobile navigation' }).getByRole('button', { name: 'Mesh', exact: true }).click();
+  await host.getByRole('button', { name: 'Disconnect demo' }).click();
+  await host.getByRole('navigation', { name: 'Mobile navigation' }).getByRole('button', { name: /^Lobby/ }).click();
+  await expect(reannounce).toBeDisabled();
+  await host.getByRole('button', { name: 'Withdraw', exact: true }).click();
+  await expect(reannounce).toHaveCount(0);
+});
 
 test('two tabs exchange challenges, legal moves, acknowledgements and chat', async ({ context }) => {
   const white = await context.newPage();
