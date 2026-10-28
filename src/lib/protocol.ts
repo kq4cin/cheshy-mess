@@ -1,13 +1,16 @@
-import type { Packet, PacketKind, Player } from '../types';
+import { Chess } from 'chess.js';
+import type { MovePayload, MoveRecord, Packet, PacketKind, Player } from '../types';
 
-// MC2 is the compact radio encoding; MC1 (verbose JSON) is still accepted from older clients and queued items.
-export const PROTOCOL_PREFIX = 'MC2:';
+// Older encodings remain readable for saved queues and incoming traffic.
+export const PROTOCOL_PREFIX = 'MC3:';
+export const COMPACT_PROTOCOL_PREFIX = 'MC2:';
 export const LEGACY_PROTOCOL_PREFIX = 'MC1:';
-export const WIRE_PREFIXES = [PROTOCOL_PREFIX, LEGACY_PROTOCOL_PREFIX] as const;
+export const WIRE_PREFIXES = [PROTOCOL_PREFIX, COMPACT_PROTOCOL_PREFIX, LEGACY_PROTOCOL_PREFIX] as const;
 export const GAME_CHANNEL = '#chess';
 export const MAX_PACKET_BYTES = 12_000;
 export const MAX_SYNC_PACKET_BYTES = MAX_PACKET_BYTES;
 
+// MC3 uses these indices on air: append new kinds, never reorder.
 export const PACKET_KINDS: readonly PacketKind[] = [
   'hello',
   'challenge',
@@ -89,10 +92,133 @@ function renameKeys(value: unknown, table: Record<string, string>): unknown {
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [table[key] ?? key, renameKeys(entry, table)]));
 }
 
+const ID_PREFIXES = ['mc', 'player', 'game', ...PACKET_KINDS, 'outbox'];
+
+function packId(value: string): string {
+  const match = /^([a-z-]+)_([a-z0-9]{10})$/.exec(value);
+  const index = match ? ID_PREFIXES.indexOf(match[1]) : -1;
+  return match && index >= 0 ? `~${index.toString(36)}${match[2]}` : value.startsWith('~') ? `~${value}` : value;
+}
+
+function unpackId(value: string): string {
+  if (value.startsWith('~~')) return value.slice(1);
+  const match = /^~([0-9a-z])([a-z0-9]{10})$/.exec(value);
+  const prefix = match ? ID_PREFIXES[parseInt(match[1], 36)] : undefined;
+  return match && prefix ? `${prefix}_${match[2]}` : value;
+}
+
+function transformIds(value: unknown, transform: (value: string) => string): unknown {
+  if (typeof value === 'string') return transform(value);
+  if (Array.isArray(value)) return value.map((entry) => transformIds(entry, transform));
+  if (!isObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, transformIds(entry, transform)]));
+}
+
+function packPayload(packet: Packet): unknown[] {
+  const payload = packet.payload;
+  if (packet.kind === 'move' && isObject(payload)
+    && typeof payload.n === 'number' && typeof payload.from === 'string' && typeof payload.to === 'string'
+    && /^[a-h][1-8]$/.test(payload.from) && /^[a-h][1-8]$/.test(payload.to)
+    && (payload.promotion === undefined || /^[qrbn]$/.test(String(payload.promotion)))
+    && typeof payload.san === 'string' && (payload.fen === undefined || typeof payload.fen === 'string')
+    && Object.keys(payload).every((key) => ['n', 'from', 'to', 'promotion', 'san', 'fen'].includes(key))) {
+    return [1, payload.n, payload.from + payload.to + (payload.promotion ?? ''), payload.san,
+      ...(payload.fen === undefined ? [] : [payload.fen])];
+  }
+  if (packet.kind === 'ack' && isObject(payload)
+    && typeof payload.packetId === 'string' && typeof payload.moveCount === 'number'
+    && (payload.gameId === undefined || typeof payload.gameId === 'string')
+    && Object.keys(payload).every((key) => ['packetId', 'moveCount', 'gameId'].includes(key))) {
+    return [3, payload.packetId, payload.moveCount,
+      ...(payload.gameId === undefined ? [] : [payload.gameId === packet.gameId ? 1 : payload.gameId])];
+  }
+  if (packet.kind === 'sync' && isObject(payload) && Array.isArray(payload.moves)
+    && Object.keys(payload).every((key) => ['moves', 'status', 'winner', 'base', 'baseFen', 'basePacketId'].includes(key))) {
+    const records: unknown[] = [];
+    for (const move of payload.moves) {
+      if (!isObject(move) || typeof move.from !== 'string' || typeof move.to !== 'string') {
+        return [0, renameKeys(payload, SHORT_KEYS)];
+      }
+      records.push([move.from + move.to + (move.promotion ?? ''), move.packetId, move.at]);
+    }
+    const compact = [2, payload.status, payload.winner ?? null, payload.base ?? null,
+      payload.baseFen ?? null, payload.basePacketId ?? null, records];
+    // Only discard derived metadata if replay reproduces it exactly.
+    const restored = unpackPayload('sync', compact);
+    if (isObject(restored) && Array.isArray(restored.moves)) {
+      const replayed = restored.moves;
+      const sameMetadata = Object.keys(payload).every((key) => key === 'moves' || payload[key] === restored[key])
+        && Object.keys(restored).every((key) => key === 'moves' || payload[key] === restored[key]);
+      const sameMoves = payload.moves.every((move: unknown, index: number) => {
+        const other: unknown = replayed[index];
+        return isObject(move) && isObject(other)
+          && Object.keys(move).every((key) => move[key] === other[key])
+          && Object.keys(other).every((key) => move[key] === other[key]);
+      });
+      if (sameMetadata && sameMoves) return compact;
+    }
+  }
+  return [0, renameKeys(payload, SHORT_KEYS)];
+}
+
+function unpackPayload(kind: PacketKind, value: unknown, gameId?: string): unknown {
+  if (!Array.isArray(value)) packetError('invalid compact payload');
+  if (value[0] === 0 && value.length === 2) return renameKeys(value[1], LONG_KEYS);
+  if (kind === 'move' && value[0] === 1 && (value.length === 4 || value.length === 5)) {
+    const [, n, coordinates, san, fen] = value;
+    if (typeof n !== 'number' || typeof coordinates !== 'string'
+      || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(coordinates) || typeof san !== 'string'
+      || (fen !== undefined && typeof fen !== 'string')) packetError('invalid compact move');
+    const payload: MovePayload = {
+      n, from: coordinates.slice(0, 2), to: coordinates.slice(2, 4),
+      ...(coordinates.length === 5 ? { promotion: coordinates[4] } : {}),
+      san, ...(fen === undefined ? {} : { fen }),
+    };
+    return payload;
+  }
+  if (kind === 'ack' && value[0] === 3 && (value.length === 3 || value.length === 4)) {
+    const [, packetId, moveCount, game] = value;
+    if (typeof packetId !== 'string' || typeof moveCount !== 'number'
+      || (game !== undefined && typeof game !== 'string' && !(game === 1 && gameId !== undefined))) packetError('invalid compact ack');
+    return { packetId, moveCount, ...(game === undefined ? {} : { gameId: game === 1 ? gameId : game }) };
+  }
+  if (kind === 'sync' && value[0] === 2 && value.length === 7) {
+    const [, status, winner, base, baseFen, basePacketId, records] = value;
+    if (typeof status !== 'string' || (winner !== null && winner !== 'w' && winner !== 'b')
+      || (base !== null && (!Number.isSafeInteger(base) || base < 0))
+      || (baseFen !== null && typeof baseFen !== 'string')
+      || (basePacketId !== null && typeof basePacketId !== 'string') || !Array.isArray(records)) packetError('invalid compact history');
+    const chess = baseFen === null ? new Chess() : new Chess(baseFen);
+    const moves: MoveRecord[] = records.map((record: unknown) => {
+      if (!Array.isArray(record) || record.length !== 3) packetError('invalid compact history move');
+      const [coordinates, packetId, at] = record;
+      if (typeof coordinates !== 'string' || !/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(coordinates)
+        || typeof packetId !== 'string' || !packetId || typeof at !== 'number' || !Number.isFinite(at)) packetError('invalid compact history move');
+      const move = chess.move({
+        from: coordinates.slice(0, 2), to: coordinates.slice(2, 4),
+        ...(coordinates.length === 5 ? { promotion: coordinates[4] } : {}),
+      });
+      return {
+        from: move.from, to: move.to, ...(move.promotion ? { promotion: move.promotion } : {}),
+        san: move.san, fen: move.after, color: move.color, packetId, at,
+      };
+    });
+    return {
+      moves, status, ...(winner === null ? {} : { winner }),
+      ...(base === null ? {} : { base }), ...(baseFen === null ? {} : { baseFen }),
+      ...(basePacketId === null ? {} : { basePacketId }),
+    };
+  }
+  return packetError('invalid compact payload');
+}
+
 export function encodePacket(packet: Packet): string {
   assertValidPacket(packet);
-  const { v: _version, ...body } = packet;
-  const wire = PROTOCOL_PREFIX + JSON.stringify(renameKeys(body, SHORT_KEYS));
+  const body = [
+    packet.id, PACKET_KINDS.indexOf(packet.kind), packet.from.id, packet.from.name,
+    packet.to ?? null, packet.gameId ?? null, packet.sentAt, packPayload(packet),
+  ];
+  const wire = PROTOCOL_PREFIX + JSON.stringify(transformIds(body, packId));
   assertSize(encoder.encode(wire));
   return wire;
 }
@@ -111,8 +237,9 @@ export function decodePacket<T = unknown>(wire: string | Uint8Array | ArrayBuffe
   } catch {
     throw new Error('Invalid MeshChess packet: malformed UTF-8');
   }
-  const compact = text.startsWith(PROTOCOL_PREFIX);
-  if (!compact && !text.startsWith(LEGACY_PROTOCOL_PREFIX)) packetError('missing MC2/MC1 prefix');
+  const compact = text.startsWith(COMPACT_PROTOCOL_PREFIX);
+  const positional = text.startsWith(PROTOCOL_PREFIX);
+  if (!positional && !compact && !text.startsWith(LEGACY_PROTOCOL_PREFIX)) packetError('missing MC3/MC2/MC1 prefix');
 
   let value: unknown;
   try {
@@ -123,6 +250,19 @@ export function decodePacket<T = unknown>(wire: string | Uint8Array | ArrayBuffe
   if (compact) {
     if (!isObject(value)) packetError('expected an object');
     value = { v: 1, ...(renameKeys(value, LONG_KEYS) as Record<string, unknown>) };
+  }
+  if (positional) {
+    const fields = transformIds(value, unpackId);
+    if (!Array.isArray(fields) || fields.length !== 8) packetError('invalid compact envelope');
+    const [id, kindIndex, fromId, name, to, gameId, sentAt, payload] = fields;
+    if (!Number.isInteger(kindIndex) || kindIndex < 0 || kindIndex >= PACKET_KINDS.length
+      || (to !== null && typeof to !== 'string') || (gameId !== null && typeof gameId !== 'string')) packetError('invalid compact envelope');
+    const kind = PACKET_KINDS[kindIndex];
+    value = {
+      v: 1, id, kind, from: { id: fromId, name },
+      ...(to === null ? {} : { to }), ...(gameId === null ? {} : { gameId }),
+      sentAt, payload: unpackPayload(kind, payload, gameId ?? undefined),
+    };
   }
   assertValidPacket(value);
   return value as Packet<T>;

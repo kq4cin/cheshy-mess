@@ -1,6 +1,6 @@
 import { Chess } from 'chess.js';
 import { describe, expect, it } from 'vitest';
-import type { MoveRecord } from '../types';
+import type { Game, MoveRecord } from '../types';
 import {
   currentFen,
   exportPgn,
@@ -9,6 +9,8 @@ import {
   legalTargets,
   makeMove,
   validateHistory,
+  buildSyncPayload,
+  restoreSyncHistory,
 } from './chess';
 
 const moves = (san: string[]): MoveRecord[] => {
@@ -29,6 +31,60 @@ const moves = (san: string[]): MoveRecord[] => {
   });
   return history;
 };
+
+function syncGame(history: MoveRecord[]): Game {
+  return {
+    id: 'game', challengeId: 'challenge', white: { id: 'white', name: 'White' },
+    black: { id: 'black', name: 'Black' }, localColor: 'w', status: 'active', moves: history,
+    createdAt: 0, updatedAt: 0, lastReadAt: 0, drawOffer: null, awaitingAck: null, seenPackets: [],
+  };
+}
+
+describe('LoRa history sync', () => {
+  it('sends only missing moves after verifying the shared base position', () => {
+    const history = moves(['e4', 'e5', 'Nf3', 'Nc6']);
+    const prefix = history.slice(0, 3);
+    const payload = buildSyncPayload(syncGame(history), { moveCount: 3, fen: currentFen(prefix), packetId: prefix.at(-1)?.packetId });
+    expect(payload.moves).toEqual(history.slice(3));
+    expect(payload.base).toBe(3);
+    expect(restoreSyncHistory(payload, prefix)).toEqual(history);
+  });
+
+  it('sends no history for equal boards while preserving terminal results', () => {
+    const history = moves(['e4', 'e5']);
+    const game = { ...syncGame(history), status: 'resigned' as const, winner: 'b' as const };
+    const payload = buildSyncPayload(game, { moveCount: 2, fen: currentFen(history), packetId: history.at(-1)?.packetId });
+    expect(payload.moves).toEqual([]);
+    expect(payload).toMatchObject({ status: 'resigned', winner: 'b' });
+    expect(restoreSyncHistory(payload, history)).toEqual(history);
+  });
+
+  it('falls back to a full snapshot for legacy, divergent, or invalid requests', () => {
+    const history = moves(['e4', 'e5']);
+    for (const request of [undefined, {}, { moveCount: 1, fen: 'mismatch' }, { moveCount: 100 }, { moveCount: -1 }, { moveCount: 0.5 }]) {
+      const payload = buildSyncPayload(syncGame(history), request);
+      expect(payload.moves).toEqual(history);
+      expect(payload.base).toBeUndefined();
+      expect(restoreSyncHistory(payload, [])).toEqual(history);
+    }
+  });
+
+  it('rejects invalid deltas instead of appending to the wrong position', () => {
+    const history = moves(['e4', 'e5']);
+    const payload = buildSyncPayload(syncGame(history), {
+      moveCount: 1, fen: currentFen(history.slice(0, 1)), packetId: history[0].packetId,
+    });
+    expect(restoreSyncHistory(payload, [])).toBeNull();
+    expect(restoreSyncHistory(payload, moves(['d4']))).toBeNull();
+    expect(restoreSyncHistory({ ...payload, base: -1 }, history)).toBeNull();
+    expect(restoreSyncHistory({ ...payload, base: 0.5 }, history)).toBeNull();
+    expect(restoreSyncHistory({ ...payload, moves: [{ ...history[1], san: 'wrong' }] }, history)).toBeNull();
+    expect(restoreSyncHistory(payload, [{ ...history[0], packetId: 'different-origin' }])).toBeNull();
+    expect(buildSyncPayload(syncGame(history), {
+      moveCount: 1, fen: currentFen(history.slice(0, 1)), packetId: 'different-origin',
+    }).base).toBeUndefined();
+  });
+});
 
 describe('chess helpers', () => {
   it('replays moves and reports legal targets and the current FEN', () => {
