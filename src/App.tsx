@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, ArrowRight, Bluetooth, Check, CheckCheck, ChevronDown, Circle,
-  Clock3, Copy, Download, Flag, Gamepad2, Handshake, Inbox, Info, Menu,
+  Clock3, Copy, Download, Flag, Gamepad2, Handshake, Inbox, Info, ListOrdered,
   MessageCircle, Plus, Radio, RefreshCw, RotateCcw, Send,
   Settings, ShieldCheck, Signal, Swords, Trash2, Trophy, Usb, Users, WifiOff, X,
 } from 'lucide-react';
@@ -14,6 +14,11 @@ import type { Challenge, Color, Game, GameStatus, ResultEntry, TransportKind } f
 
 type View = 'games' | 'lobby' | 'network';
 type SideTab = 'moves' | 'chat';
+type GameFilter = 'all' | 'turn' | 'finished';
+
+function isYourTurn(game: Game) {
+  return game.status === 'active' && (game.moves.length % 2 === 0 ? 'w' : 'b') === game.localColor;
+}
 
 function timeAgo(timestamp: number) {
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
@@ -60,7 +65,8 @@ function App() {
   const [newGameOpen, setNewGameOpen] = useState(false);
   const [newColor, setNewColor] = useState<Color | 'random'>('random');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [mobileMenu, setMobileMenu] = useState(false);
+  const [mobileGameList, setMobileGameList] = useState(true);
+  const [gameFilter, setGameFilter] = useState<GameFilter>('all');
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [chatText, setChatText] = useState('');
   const [globalChat, setGlobalChat] = useState(false);
@@ -68,8 +74,13 @@ function App() {
   const [toast, setToast] = useState('');
   const [installPrompt, setInstallPrompt] = useState<{ prompt(): Promise<void> } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatButtonRef = useRef<HTMLButtonElement>(null);
+  const movesButtonRef = useRef<HTMLButtonElement>(null);
+  const panelTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const gamePanelRef = useRef<HTMLElement>(null);
 
   const sortedGames = useMemo(() => [...state.games].sort((a, b) => {
+    if ((a.status === 'active') !== (b.status === 'active')) return a.status === 'active' ? -1 : 1;
     if (a.status === 'active' && b.status === 'active') {
       const aTurn = a.moves.length % 2 === 0 ? 'w' : 'b';
       const bTurn = b.moves.length % 2 === 0 ? 'w' : 'b';
@@ -77,6 +88,10 @@ function App() {
     }
     return b.updatedAt - a.updatedAt;
   }), [state.games]);
+  const turnCount = sortedGames.filter(isYourTurn).length;
+  const finishedCount = sortedGames.filter((item) => item.status !== 'active').length;
+  const filteredGames = sortedGames.filter((item) => gameFilter === 'turn' ? isYourTurn(item)
+    : gameFilter === 'finished' ? item.status !== 'active' : true);
   const game = sortedGames.find((item) => item.id === selectedId) ?? sortedGames[0] ?? null;
   const gameDeliveryPaused = mesh.transport.kind !== 'demo'
     && state.outbox.some((item) => item.packetId === game?.awaitingAck && isRadioDeliveryPaused(item));
@@ -90,13 +105,46 @@ function App() {
 
   useEffect(() => {
     if (game) {
+      setSelectedId(game.id);
       setOrientation(game.localColor);
       setReviewPly(null);
-      mesh.markRead(game.id);
     }
   }, [game?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (game && view === 'games' && sideTab === 'chat' && !globalChat
+      && (mobileChatOpen || window.matchMedia('(min-width: 901px)').matches)) mesh.markRead(game.id);
+  }, [game?.id, view, sideTab, globalChat, mobileChatOpen, chats.length, mesh.markRead]);
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chats.length, sideTab, globalChat]);
+  useEffect(() => {
+    const messages = chatEndRef.current?.parentElement;
+    messages?.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+  }, [chats.length, sideTab, globalChat, mobileChatOpen]);
+  useEffect(() => {
+    setMobileChatOpen(false);
+  }, [view, game?.id]);
+  useEffect(() => {
+    if (!mobileChatOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileChatOpen(false);
+        panelTriggerRef.current?.focus({ preventScroll: true });
+      }
+    };
+    const viewport = window.visualViewport;
+    const resizePanel = () => {
+      gamePanelRef.current?.style.setProperty('--chat-viewport-height', `${viewport?.height ?? window.innerHeight}px`);
+      gamePanelRef.current?.style.setProperty('--chat-viewport-top', `${viewport?.offsetTop ?? 0}px`);
+    };
+    resizePanel();
+    viewport?.addEventListener('resize', resizePanel);
+    viewport?.addEventListener('scroll', resizePanel);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      viewport?.removeEventListener('resize', resizePanel);
+      viewport?.removeEventListener('scroll', resizePanel);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [mobileChatOpen]);
   useEffect(() => {
     const listener = (event: Event) => {
       event.preventDefault();
@@ -112,6 +160,25 @@ function App() {
   }, [toast]);
 
   const notify = (text: string) => setToast(text);
+  const showGames = () => {
+    setView('games');
+    setMobileGameList(true);
+    setMobileChatOpen(false);
+  };
+  const openPanel = (tab: SideTab) => {
+    panelTriggerRef.current = tab === 'chat' ? chatButtonRef.current : movesButtonRef.current;
+    setSideTab(tab);
+    setMobileChatOpen(true);
+    setMobileGameList(false);
+  };
+  const closePanel = () => {
+    setMobileChatOpen(false);
+    panelTriggerRef.current?.focus({ preventScroll: true });
+  };
+  const reviewMove = (ply: number) => {
+    setReviewPly(ply);
+    closePanel();
+  };
   const copy = async (text: string, message: string) => {
     try { await navigator.clipboard.writeText(text); notify(message); } catch { notify('Clipboard unavailable'); }
   };
@@ -136,38 +203,43 @@ function App() {
 
   return <div className="app-shell">
     <header className="topbar">
-      <button className="icon-button mobile-only" onClick={() => setMobileMenu(!mobileMenu)} aria-label="Open navigation"><Menu size={21} /></button>
-      <a className="brand" href="#" onClick={(e) => { e.preventDefault(); setView('games'); }}><span className="brand-mark">♞</span><span>cheshy <span>mess</span></span></a>
+      <a className="brand" href="#" onClick={(e) => { e.preventDefault(); showGames(); }}><span className="brand-mark">♞</span><span>cheshy <span>mess</span></span></a>
       <span className="brand-tagline">CHESS BEYOND CONNECTIVITY</span>
       <nav className="main-nav" aria-label="Main navigation">
-        <button className={view === 'games' ? 'active' : ''} onClick={() => setView('games')}><Swords size={17} />My games{sortedGames.filter((g) => g.status === 'active').length > 0 && <b>{sortedGames.filter((g) => g.status === 'active').length}</b>}</button>
+        <button className={view === 'games' ? 'active' : ''} onClick={showGames}><Swords size={17} />My games{sortedGames.filter((g) => g.status === 'active').length > 0 && <b>{sortedGames.filter((g) => g.status === 'active').length}</b>}</button>
         <button className={view === 'lobby' ? 'active' : ''} onClick={() => setView('lobby')}><Users size={17} />Lobby{activeChallenges.length > 0 && <b>{activeChallenges.length}</b>}</button>
       </nav>
       <div className="header-actions">
-        <button className={`connection-pill ${mesh.transport.status}`} onClick={() => setView('network')}><span className="status-dot" />{mesh.transport.status === 'connected' ? mesh.transport.kind === 'demo' ? 'Local demo' : 'MeshCore online' : 'Off-grid'}<ChevronDown size={14} /></button>
+        <button className={`connection-pill ${mesh.transport.status}`} aria-label={`Connection settings: ${mesh.transport.detail}`} onClick={() => setView('network')}><span className="status-dot" />{mesh.transport.status === 'connected' ? mesh.transport.kind === 'demo' ? 'Local demo' : 'Radio online' : mesh.transport.status === 'connecting' ? 'Connecting' : mesh.transport.status === 'error' ? 'Connection error' : 'Off-grid'}<ChevronDown size={14} /></button>
         <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Settings"><Settings size={20} /></button>
         <button className="avatar" onClick={() => setSettingsOpen(true)} aria-label="Your profile">{state.profile.name.slice(0, 1).toUpperCase()}</button>
       </div>
     </header>
 
-    {view === 'games' && <main className="game-layout">
-      <aside className={`games-sidebar ${mobileMenu ? 'mobile-open' : ''}`}>
+    {view === 'games' && <main className={`game-layout ${mobileGameList && game ? 'show-game-list' : ''}`}>
+      <aside className="games-sidebar">
         <div className="sidebar-heading"><div><span className="eyebrow">YOUR CORRESPONDENCE</span><h2>My games</h2></div><button className="icon-button" onClick={() => setNewGameOpen(true)} aria-label="New game"><Plus size={21} /></button></div>
         <button className="new-game-button" onClick={() => setNewGameOpen(true)}><Plus size={18} />New game<span>over the mesh</span></button>
-        <div className="game-filters"><button className="active">All <span>{state.games.length}</span></button><button>Your turn <span>{state.games.filter((g) => g.status === 'active' && (g.moves.length % 2 === 0 ? 'w' : 'b') === g.localColor).length}</span></button></div>
+        <p className="games-summary">{turnCount ? `${turnCount} game${turnCount === 1 ? '' : 's'} waiting for your move` : 'No rush. Your next move will be here.'}</p>
+        <div className="game-filters" aria-label="Filter games">
+          <button className={gameFilter === 'all' ? 'active' : ''} aria-pressed={gameFilter === 'all'} onClick={() => setGameFilter('all')}>All <span>{state.games.length}</span></button>
+          <button className={gameFilter === 'turn' ? 'active' : ''} aria-pressed={gameFilter === 'turn'} onClick={() => setGameFilter('turn')}>Your turn <span>{turnCount}</span></button>
+          <button className={gameFilter === 'finished' ? 'active' : ''} aria-pressed={gameFilter === 'finished'} onClick={() => setGameFilter('finished')}>Finished <span>{finishedCount}</span></button>
+        </div>
         <div className="game-list">
-          {sortedGames.map((item) => {
+          {filteredGames.map((item) => {
             const other = opponentOf(item, state.profile.id);
             const turn = item.moves.length % 2 === 0 ? 'w' : 'b';
             const isTurn = item.status === 'active' && turn === item.localColor;
-            return <button key={item.id} className={`game-list-item ${game?.id === item.id ? 'selected' : ''}`} onClick={() => { setSelectedId(item.id); setMobileMenu(false); }}>
+            return <button key={item.id} className={`game-list-item ${game?.id === item.id ? 'selected' : ''}`} onClick={() => { setSelectedId(item.id); setMobileGameList(false); }}>
               <span className={`mini-avatar ${item.localColor === 'w' ? 'dark' : 'light'}`}>{other.name.slice(0, 1).toUpperCase()}</span>
               <span className="game-item-copy"><strong>{other.name}</strong><small>{item.status === 'active' ? isTurn ? 'Your turn' : 'Waiting for opponent' : resultLabel(item)}</small><small className="game-item-time"><Clock3 size={12} />{timeAgo(item.updatedAt)} · {item.moves.length} {item.moves.length === 1 ? 'move' : 'moves'}</small></span>
-              {unread(item.id) > 0 && <span className="unread-badge">{unread(item.id)}</span>}
+              {unread(item.id) > 0 && <span className="unread-badge" aria-label={`${unread(item.id)} unread messages`}>{unread(item.id)}</span>}
               {isTurn && <span className="turn-dot" />}
             </button>;
           })}
           {!state.games.length && <div className="empty-list"><span>♟</span><h3>No games yet</h3><p>Create a game and make your first move when a player joins.</p></div>}
+          {state.games.length > 0 && !filteredGames.length && <div className="empty-list"><Clock3 size={28} /><h3>{gameFilter === 'turn' ? 'All caught up' : 'No finished games yet'}</h3><p>{gameFilter === 'turn' ? 'We will keep your games here while you wait for an opponent.' : 'Completed games will appear here.'}</p><button className="text-button" onClick={() => setGameFilter('all')}>Show all games<ArrowRight size={16} /></button></div>}
         </div>
         <button className="sidebar-lobby-link" onClick={() => setView('lobby')}><Inbox size={17} />Find an open game<ArrowRight size={16} /></button>
         <div className="mesh-note"><ShieldCheck size={18} /><div><strong>Made for the long game</strong><p>Your games are saved on this device. Moves queue until your radio reconnects.</p></div></div>
@@ -175,6 +247,7 @@ function App() {
 
       <section className="board-workspace">
         {game && opponent ? <>
+          <div className="board-navigation"><button onClick={showGames}><ArrowLeft size={18} />All games</button><span>{sortedGames.length} saved {sortedGames.length === 1 ? 'game' : 'games'}</span></div>
           <div className="player-strip opponent-strip">
             <span className="player-avatar">{opponent.name.slice(0, 1).toUpperCase()}<i className={onlinePeers.some((p) => p.id === opponent.id) ? 'online' : ''} /></span>
             <div><strong>{opponent.name}</strong><span><span className="tiny-dot" />{onlinePeers.some((p) => p.id === opponent.id) ? 'Recently on mesh' : 'Asynchronous opponent'}</span></div>
@@ -194,7 +267,8 @@ function App() {
           </div>
           <div className="board-toolbar">
             <button onClick={() => setOrientation(orientation === 'w' ? 'b' : 'w')}><RotateCcw size={16} />Flip board</button>
-            <button onClick={() => { setSideTab('chat'); setMobileChatOpen(true); }}><MessageCircle size={16} />Chat{unread(game.id) > 0 && <i />}</button>
+            <button className="mobile-moves-button" ref={movesButtonRef} aria-controls="game-panel" aria-expanded={sideTab === 'moves' && mobileChatOpen} onClick={() => openPanel('moves')}><ListOrdered size={16} />Moves</button>
+            <button ref={chatButtonRef} aria-controls="game-panel" aria-expanded={sideTab === 'chat' && mobileChatOpen} onClick={() => openPanel('chat')}><MessageCircle size={16} />Chat{unread(game.id) > 0 && <i />}</button>
             {game.status === 'active' ? <button onClick={() => setConfirm('resign')}><Flag size={16} />Resign</button> : <button onClick={() => setNewGameOpen(true)}><Plus size={16} />New game</button>}
           </div>
         </> : <div className="welcome-board">
@@ -203,24 +277,25 @@ function App() {
           <p>Play correspondence chess over MeshCore radio.<br />No servers. No accounts. Just you and the game.</p>
           <button className="primary-button" onClick={() => setNewGameOpen(true)}><Plus size={18} />Start a new game</button>
           <button className="text-button" onClick={() => setView('lobby')}>or find a game in the lobby <ArrowRight size={15} /></button>
+          <div className="welcome-guide"><strong>Your first game in three steps</strong><p>Choose your color. Post a challenge. Play when someone joins.</p><button className="text-button" onClick={() => setView('network')}><Radio size={16} />Connect a radio or try the local demo<ArrowRight size={15} /></button></div>
         </div>}
       </section>
 
-      <aside className={`game-panel ${mobileChatOpen ? 'mobile-chat-open' : ''}`}>
+      <aside id="game-panel" ref={gamePanelRef} className={`game-panel ${mobileChatOpen ? 'mobile-chat-open' : ''}`}>
         {game && opponent ? <>
-          <button className="mobile-chat-close icon-button" onClick={() => setMobileChatOpen(false)} aria-label="Close chat"><X size={20} /></button>
+          <div className="mobile-chat-header"><button className="mobile-chat-close" onClick={closePanel} aria-label={sideTab === 'chat' ? 'Close chat' : 'Close moves'}><ArrowLeft size={20} />Back to board</button><span>{sideTab === 'chat' ? 'Conversation' : 'Game details'}</span></div>
           <div className="panel-tabs"><button className={sideTab === 'moves' ? 'active' : ''} onClick={() => setSideTab('moves')}>Moves</button><button className={sideTab === 'chat' ? 'active' : ''} onClick={() => { setSideTab('chat'); setGlobalChat(false); mesh.markRead(game.id); }}>Chat{unread(game.id) > 0 && <b>{unread(game.id)}</b>}</button></div>
-          {sideTab === 'moves' ? <>
+          {sideTab === 'moves' ? <div className="moves-panel">
             <div className="game-meta"><div><span className="eyebrow">CORRESPONDENCE</span><h3>Game #{game.id.slice(-6).toUpperCase()}</h3></div><span className="async-badge"><Clock3 size={12} />ASYNC</span></div>
             <div className="move-table"><div className="move-table-head"><span>#</span><span>WHITE</span><span>BLACK</span></div>
-              {Array.from({ length: Math.ceil(game.moves.length / 2) }, (_, index) => <div className="move-row" key={index}><span>{index + 1}.</span><button className={reviewPly === index * 2 + 1 ? 'active' : ''} onClick={() => setReviewPly(index * 2 + 1)}>{game.moves[index * 2]?.san}</button><button className={reviewPly === index * 2 + 2 ? 'active' : ''} onClick={() => game.moves[index * 2 + 1] && setReviewPly(index * 2 + 2)}>{game.moves[index * 2 + 1]?.san}</button></div>)}
+              {Array.from({ length: Math.ceil(game.moves.length / 2) }, (_, index) => <div className="move-row" key={index}><span>{index + 1}.</span><button className={reviewPly === index * 2 + 1 ? 'active' : ''} onClick={() => reviewMove(index * 2 + 1)}>{game.moves[index * 2]?.san}</button><button disabled={!game.moves[index * 2 + 1]} className={reviewPly === index * 2 + 2 ? 'active' : ''} onClick={() => reviewMove(index * 2 + 2)}>{game.moves[index * 2 + 1]?.san}</button></div>)}
               {!game.moves.length && <div className="no-moves"><span>♙</span><p>The board is set.<br />White makes the first move.</p></div>}
             </div>
             <div className="history-controls"><button onClick={() => setReviewPly(0)} disabled={!game.moves.length} aria-label="First position">|‹</button><button onClick={() => setReviewPly(Math.max(0, (reviewPly ?? game.moves.length) - 1))} disabled={!game.moves.length} aria-label="Previous move"><ArrowLeft size={17} /></button><span>{reviewPly ?? game.moves.length} / {game.moves.length}</span><button onClick={() => { const next = (reviewPly ?? game.moves.length) + 1; setReviewPly(next >= game.moves.length ? null : next); }} disabled={!game.moves.length || reviewPly === null} aria-label="Next move"><ArrowRight size={17} /></button><button onClick={() => setReviewPly(null)} disabled={reviewPly === null} aria-label="Latest position">›|</button></div>
             {game.drawOffer && <div className="draw-offer"><Handshake size={20} /><div><strong>{game.drawOffer.by === state.profile.id ? 'Draw offered' : `${opponent.name} offers a draw`}</strong><p>{game.drawOffer.by === state.profile.id ? 'Waiting for a response.' : 'Do you agree to split the point?'}</p></div>{game.drawOffer.by !== state.profile.id && <div className="draw-actions"><button onClick={() => mesh.respondDraw(game.id, 'accept')}>Accept</button><button onClick={() => mesh.respondDraw(game.id, 'decline')}>Decline</button></div>}</div>}
             <div className="panel-actions"><button onClick={() => mesh.offerDraw(game.id)} disabled={game.status !== 'active' || !!game.drawOffer}><Handshake size={16} />Offer draw</button><button onClick={downloadPgn}><Download size={16} />Export PGN</button></div>
             <div className="sync-row"><span>{game.awaitingAck ? <><RefreshCw size={13} className={gameDeliveryPaused ? undefined : 'spin'} />{gameDeliveryPaused ? 'Paused - retry in Mesh or request sync' : 'Awaiting acknowledgement'}</> : <><CheckCheck size={14} />Board synchronized</>}</span><button onClick={() => mesh.requestSync(game.id)} title="Request state sync"><RefreshCw size={14} /></button></div>
-          </> : <ChatPanel chats={chats} text={chatText} setText={setChatText} send={submitChat} globalChat={globalChat} setGlobalChat={setGlobalChat} hasGame endRef={chatEndRef} />}
+          </div> : <ChatPanel chats={chats} text={chatText} setText={setChatText} send={submitChat} globalChat={globalChat} setGlobalChat={setGlobalChat} hasGame endRef={chatEndRef} />}
           <div className="game-id-row">Game ID <button onClick={() => copy(game.id, 'Game ID copied')}>{game.id.slice(-12)}<Copy size={12} /></button></div>
         </> : <div className="panel-placeholder"><Radio size={28} /><h3>Connected by chess</h3><p>Moves and chat travel directly over your MeshCore network, even when the internet is nowhere to be found.</p><button className="text-button" onClick={() => setView('network')}>Set up your radio <ArrowRight size={15} /></button></div>}
       </aside>
@@ -228,9 +303,10 @@ function App() {
 
     {view === 'lobby' && <main className="page-content">
       <div className="page-title"><div><span className="eyebrow">PLAY AT YOUR OWN PACE</span><h1>Open games</h1><p>Find a player on the mesh, or post a challenge for someone to discover.</p></div><button className="primary-button" onClick={() => setNewGameOpen(true)}><Plus size={18} />Create game</button></div>
+      <div className="connection-context"><Radio size={18} /><p>{mesh.transport.status !== 'connected' ? 'You are offline. Connect to discover players and send your challenge.' : mesh.transport.kind === 'demo' ? 'Local demo: open a second browser tab to find an opponent. Real radio players use Mesh.' : 'Listening for players on #chess. Challenges appear as they arrive.'}</p><button onClick={() => setView('network')}>Connection settings<ArrowRight size={16} /></button></div>
       <div className="lobby-grid"><section className="surface"><div className="section-heading"><h2><Inbox size={20} />Available challenges</h2><span>{activeChallenges.length} open</span></div>
-        {ownChallenge && <div className="own-challenge"><span className="pulse-radio"><Radio size={20} /></span><div><strong>Your challenge is on the mesh</strong><p>Waiting for a player to accept · {ownChallenge.hostColor} pieces</p></div><button className="secondary-button" onClick={() => mesh.withdrawChallenge(ownChallenge.id)}>Withdraw</button></div>}
-        <div className="challenge-list">{activeChallenges.map((challenge) => <ChallengeRow key={challenge.id} challenge={challenge} onAccept={() => { const gameId = mesh.acceptChallenge(challenge); if (gameId) setSelectedId(gameId); setView('games'); notify('Game accepted — good luck!'); }} />)}{!activeChallenges.length && !ownChallenge && <div className="large-empty"><span>♜</span><h3>The board is quiet</h3><p>No open challenges heard yet. Create one, or keep this page open while players join the mesh.</p><button className="primary-button" onClick={() => setNewGameOpen(true)}><Plus size={17} />Post a challenge</button></div>}</div>
+        {ownChallenge && <div className="own-challenge" role="status"><span className="pulse-radio"><Radio size={20} /></span><div><strong>Your challenge is on the mesh</strong><p>Waiting for a player to accept · {ownChallenge.hostColor === 'random' ? 'Random colors' : `You play ${ownChallenge.hostColor === 'w' ? 'White' : 'Black'}`}</p><p>You can browse your games while you wait.</p></div><button className="secondary-button" onClick={() => mesh.withdrawChallenge(ownChallenge.id)}>Withdraw</button></div>}
+        <div className="challenge-list">{activeChallenges.map((challenge) => <ChallengeRow key={challenge.id} challenge={challenge} onAccept={() => { const gameId = mesh.acceptChallenge(challenge); if (!gameId) return; setSelectedId(gameId); setMobileGameList(false); setView('games'); notify('Game accepted — good luck!'); }} />)}{!activeChallenges.length && !ownChallenge && <div className="large-empty"><span>♜</span><h3>The board is quiet</h3><p>No open challenges heard yet. Create one, or keep this page open while players join the mesh.</p><button className="primary-button" onClick={() => setNewGameOpen(true)}><Plus size={17} />Post a challenge</button></div>}</div>
       </section><aside className="surface peers-card"><div className="section-heading"><h2><Signal size={20} />Heard on the mesh</h2><span>{onlinePeers.length}</span></div>{onlinePeers.map((peer) => <div className="peer-row" key={peer.id}><span className="mini-avatar">{peer.name[0].toUpperCase()}</span><div><strong>{peer.name}</strong><small>Last heard {timeAgo(peer.lastSeen)}</small></div><span className="status-dot" /></div>)}{!onlinePeers.length && <p className="muted-copy">No other players heard recently. In demo mode, open Cheshy Mess in a second tab to meet yourself on the mesh.</p>}
           <div className="results-block"><div className="section-heading"><h2><Trophy size={20} />Recent results</h2><span>{state.results.length}</span></div>
             {state.results.map((entry) => <div className="result-row" key={entry.id}>{entry.outcome === 'draw' ? <Handshake size={16} className="result-icon" /> : <Trophy size={16} className="result-icon" />}<div><strong>{feedResultText(entry)}</strong><small>{feedResultReason(entry.reason)} · {timeAgo(entry.at)}</small></div></div>)}
@@ -254,7 +330,7 @@ function App() {
       <section className="surface radio-log"><div className="section-heading"><h2>Connection activity</h2><span>{mesh.logs.length} events</span></div>{mesh.logs.length ? [...mesh.logs].reverse().map((log) => <div key={log.id}><time>{new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><span>{log.text}</span></div>) : <p className="muted-copy">Connection and packet activity will appear here.</p>}</section>
     </main>}
 
-    <nav className="mobile-nav"><button className={view === 'games' ? 'active' : ''} onClick={() => setView('games')}><Swords size={20} />Games</button><button className={view === 'lobby' ? 'active' : ''} onClick={() => setView('lobby')}><Users size={20} />Lobby</button><button onClick={() => setNewGameOpen(true)}><Plus size={22} />New</button><button className={view === 'network' ? 'active' : ''} onClick={() => setView('network')}><Radio size={20} />Mesh</button></nav>
+    <nav className="mobile-nav" aria-label="Mobile navigation"><button className={view === 'games' ? 'active' : ''} aria-current={view === 'games' ? 'page' : undefined} onClick={showGames}><Swords size={20} />Games{turnCount > 0 && <b aria-label={`${turnCount} games need your move`}>{turnCount}</b>}</button><button className={view === 'lobby' ? 'active' : ''} aria-current={view === 'lobby' ? 'page' : undefined} onClick={() => setView('lobby')}><Users size={20} />Lobby{activeChallenges.length > 0 && <b>{activeChallenges.length}</b>}</button><button className="mobile-create" onClick={() => setNewGameOpen(true)}><Plus size={22} />New</button><button className={view === 'network' ? 'active' : ''} aria-current={view === 'network' ? 'page' : undefined} onClick={() => setView('network')}><Radio size={20} />Mesh</button></nav>
 
     {newGameOpen && <Modal title="Create a new game" onClose={() => setNewGameOpen(false)}><div className="modal-intro"><span>♞</span><p>Post an open challenge to <strong>#chess</strong>. Your game begins when another player accepts.</p></div><label className="field-label">PLAY AS</label><div className="color-options">{(['w', 'random', 'b'] as const).map((color) => <button key={color} className={newColor === color ? 'selected' : ''} onClick={() => setNewColor(color)}><span>{color === 'w' ? '♔' : color === 'b' ? '♚' : '⚄'}</span>{color === 'w' ? 'White' : color === 'b' ? 'Black' : 'Random'}{newColor === color && <Check size={15} />}</button>)}</div><div className="async-explainer"><Clock3 size={19} /><div><strong>Asynchronous · no clock</strong><p>Moves are queued until your mesh connection is available. Both players can take as long as they like.</p></div></div><button className="primary-button modal-primary" onClick={() => { mesh.createChallenge(newColor); setNewGameOpen(false); setView('lobby'); notify('Challenge posted to the mesh'); }}><Radio size={18} />Post challenge to mesh</button></Modal>}
 
@@ -282,9 +358,35 @@ function ConnectionCard({ icon, title, description, action, onClick, active, dis
 
 function Modal({ title, onClose, children }: { title: string; onClose(): void; children: React.ReactNode }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => { closeRef.current?.focus(); }, []);
-  useEffect(() => { const listener = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; document.addEventListener('keydown', listener); return () => document.removeEventListener('keydown', listener); }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-label={title}><div className="modal-heading"><h2>{title}</h2><button className="icon-button" ref={closeRef} onClick={onClose} aria-label="Close dialog"><X size={20} /></button></div>{children}</section></div>;
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    closeRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, []);
+  return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-label={title} onKeyDown={(event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    }
+    if (event.key !== 'Tab') return;
+    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')]
+      .filter((element) => element.getClientRects().length > 0);
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
+  }}><div className="modal-heading"><h2>{title}</h2><button className="icon-button" ref={closeRef} onClick={onClose} aria-label="Close dialog"><X size={20} /></button></div>{children}</section></div>;
 }
 
 export default App;

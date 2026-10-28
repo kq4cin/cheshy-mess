@@ -2,6 +2,164 @@ import { expect, test } from '@playwright/test';
 import { encodePacket, hashtagKey, PACKET_KINDS } from '../src/lib/protocol';
 import type { PersistedState } from '../src/types';
 
+test('mobile game hub filters saved games and returns from move review to a stable board', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.waitForSelector('.welcome-board');
+  await page.evaluate((wire) => {
+    const channel = new BroadcastChannel('meshchess-demo-v1');
+    channel.postMessage(wire);
+    channel.close();
+  }, encodePacket({
+    v: 1, id: 'hub-challenge', kind: 'challenge',
+    from: { id: 'remote', name: 'Remote player' },
+    payload: { challengeId: 'hub-game', hostColor: 'b' }, sentAt: Date.now(),
+  }));
+  const navigation = page.getByRole('navigation', { name: 'Mobile navigation' });
+  await navigation.getByRole('button', { name: /^Lobby/ }).click();
+  await expect(page.locator('.connection-context')).toContainText('open a second browser tab');
+  await page.getByRole('button', { name: /^Accept/ }).click();
+  await page.getByRole('button', { name: /^e2, white pawn/ }).click();
+  await page.getByRole('button', { name: /^e4, legal move/ }).click();
+  await expect(page.locator('.turn-banner')).toContainText('Remote player');
+  await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('meshchess', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = database.transaction('state', 'readwrite');
+        const store = transaction.objectStore('state');
+        const request = store.get('current');
+        request.onsuccess = () => {
+          const state = request.result as PersistedState;
+          const base = state.games[0];
+          store.put({ ...state, games: [
+            base,
+            { ...base, id: 'your-turn', challengeId: 'your-turn', moves: [], awaitingAck: null,
+              black: { id: 'other', name: 'Awaiting you' } },
+            { ...base, id: 'finished', challengeId: 'finished', status: 'resigned', winner: 'w', awaitingAck: null,
+              black: { id: 'finished-player', name: 'A very long opponent display name' }, updatedAt: Date.now() + 1000 },
+          ] }, 'current');
+        };
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } finally {
+      database.close();
+    }
+  });
+  await page.reload();
+  const games = page.locator('.game-list-item');
+  await expect(games).toHaveCount(3);
+  await expect(games.first()).toContainText('Awaiting you');
+  await expect(page.locator('.board-workspace')).toBeHidden();
+  await page.getByRole('button', { name: /^Your turn/ }).click();
+  await expect(games).toHaveCount(1);
+  await expect(games).toContainText('Awaiting you');
+  await page.getByRole('button', { name: /^Finished/ }).click();
+  await expect(games).toHaveCount(1);
+  await expect(games).toContainText('White wins by resignation');
+  await page.getByRole('button', { name: /^All / }).click();
+  await expect(games).toHaveCount(3);
+  for (const width of [320, 820, 901, 1150, 1440, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(games.first()).toBeInViewport({ ratio: 1 });
+    expect(await page.evaluate(() => document.body.scrollWidth)).toBe(width);
+  }
+  await games.filter({ hasText: 'Remote player' }).click();
+  await expect(page.locator('.games-sidebar')).toBeHidden();
+  await expect(page.getByRole('button', { name: /^e4, white pawn, last move/ })).toBeVisible();
+  await page.locator('.board-toolbar').getByRole('button', { name: 'Moves', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Offer draw' })).toBeVisible();
+  await page.locator('.move-row').getByRole('button', { name: 'e4', exact: true }).click();
+  await expect(page.locator('.game-panel')).toBeHidden();
+  await expect(page.getByText('Reviewing move 1 of 1')).toBeVisible();
+  await expect(page.getByRole('button', { name: /^e4, white pawn/ })).toBeDisabled();
+  await page.getByRole('button', { name: 'Return to live' }).click();
+  await expect(page.getByText('Reviewing move 1 of 1')).toHaveCount(0);
+  await page.getByRole('button', { name: 'All games', exact: true }).click();
+  await expect(games).toHaveCount(3);
+  const create = navigation.getByRole('button', { name: 'New', exact: true });
+  await create.click();
+  const close = page.getByRole('button', { name: 'Close dialog' });
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.getByRole('button', { name: 'Post challenge to mesh' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(create).toBeFocused();
+  await navigation.getByRole('button', { name: 'Mesh', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Mesh connection' })).toBeVisible();
+  await navigation.getByRole('button', { name: /^Games/ }).click();
+  await expect(games).toHaveCount(3);
+});
+
+for (const viewport of [
+  { width: 320, height: 568 },
+  { width: 390, height: 844 },
+  { width: 844, height: 390 },
+  { width: 820, height: 1180 },
+]) {
+  test(`chat stays dismissible and usable at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+    await page.waitForSelector('.welcome-board');
+    await page.evaluate((wire) => {
+      const channel = new BroadcastChannel('meshchess-demo-v1');
+      channel.postMessage(wire);
+      channel.close();
+    }, encodePacket({
+      v: 1, id: 'mobile-challenge', kind: 'challenge',
+      from: { id: 'remote', name: 'Remote player' },
+      payload: { challengeId: 'mobile-game', hostColor: 'b' }, sentAt: Date.now(),
+    }));
+    await page.getByRole('button', { name: /^Lobby/ }).filter({ visible: true }).click();
+    await page.getByRole('button', { name: /^Accept/ }).click();
+    const open = page.locator('.board-toolbar').getByRole('button', { name: 'Chat', exact: true });
+    const close = page.getByRole('button', { name: /^Close (chat|moves)$/ });
+    const input = page.getByRole('textbox', { name: 'Chat message' });
+    const send = page.getByRole('button', { name: 'Send message' });
+    const expectReachable = async (locator: typeof close) => {
+      await expect(locator).toBeInViewport({ ratio: 1 });
+      await locator.click({ trial: true });
+    };
+    await open.click();
+    await expect(close).toHaveText('Back to board');
+    await expectReachable(close);
+    for (let index = 0; index < 12; index += 1) {
+      await input.fill(`Message ${index}: ${'A longer chat message. '.repeat(5)}`);
+      await send.click();
+    }
+    await input.fill('Keep this draft');
+    await expectReachable(close);
+    // A reduced viewport exercises the space available while a mobile keyboard is open.
+    await page.setViewportSize({ width: viewport.width, height: 360 });
+    await expectReachable(close);
+    await expect(input).toBeInViewport({ ratio: 1 });
+    await expectReachable(send);
+    await close.click();
+    await expect(page.locator('.game-panel')).toBeHidden();
+    await expect(open).toBeFocused();
+    await open.click();
+    await expect(input).toHaveValue('Keep this draft');
+    await page.locator('.panel-tabs').getByRole('button', { name: 'Moves', exact: true }).click();
+    await expectReachable(close);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.game-panel')).toBeHidden();
+    await page.setViewportSize(viewport);
+    await page.locator('.connection-pill').click();
+    await page.getByRole('button', { name: /^Games/ }).filter({ visible: true }).or(
+      page.getByRole('button', { name: /^My games/ }).filter({ visible: true }),
+    ).click();
+    await expect(page.locator('.game-panel')).toBeHidden();
+    expect(await page.evaluate(() => document.body.scrollWidth)).toBe(viewport.width);
+  });
+}
+
 test('radio retries once after five minutes, stays paused after reload, and allows one manual attempt', async ({ page }) => {
   await page.clock.install();
   await page.addInitScript(({ secret, resignKind }) => {
