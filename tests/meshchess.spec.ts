@@ -2,6 +2,34 @@ import { expect, test } from '@playwright/test';
 import { decodePacket, encodePacket, hashtagKey, PACKET_KINDS } from '../src/lib/protocol';
 import type { PersistedState } from '../src/types';
 
+test('local demo highlights radio connection actions on desktop and mobile', async ({ page }) => {
+  await page.goto('/');
+  const connection = page.locator('.connection-pill');
+  const mesh = page.getByRole('navigation', { name: 'Mobile navigation' }).getByRole('button', { name: 'Mesh', exact: true });
+  await expect(connection).toHaveText('Connect radio');
+  await expect(connection).toHaveClass(/mesh-call-to-action/);
+  await expect(connection).toHaveAccessibleName(/Demo channel connected.*Connect a MeshCore radio/);
+  for (const width of [1440, 820, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(connection).toBeInViewport({ ratio: 1 });
+    if (width <= 900) {
+      await expect(mesh).toBeInViewport({ ratio: 1 });
+      await expect(mesh).toHaveClass(/mesh-call-to-action/);
+    }
+    expect(await page.evaluate(() => document.body.scrollWidth)).toBe(width);
+  }
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(mesh).toHaveCSS('animation-name', 'none');
+  await expect(mesh).not.toHaveCSS('box-shadow', 'none');
+  await mesh.click();
+  await expect(page.getByRole('heading', { name: 'Mesh connection' })).toBeVisible();
+  await expect(page.locator('.mesh-call-to-action')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Disconnect demo', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Mobile navigation' }).getByRole('button', { name: /^Games/ }).click();
+  await expect(connection).toHaveText('Off-grid');
+  await expect(page.locator('.mesh-call-to-action')).toHaveCount(0);
+});
+
 test('mobile game hub filters saved games and returns from move review to a stable board', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
@@ -231,6 +259,10 @@ test('radio retries once after five minutes, stays paused after reload, and allo
   await page.getByRole('button', { name: 'Connect radio', exact: true }).click();
   const sends = () => page.evaluate(() => Number(sessionStorage.getItem('radio-sends') ?? 0));
   await expect.poll(sends).toBe(1);
+  await page.getByRole('button', { name: /^My games/ }).click();
+  await expect(page.locator('.connection-pill')).toHaveText('Radio online');
+  await expect(page.locator('.mesh-call-to-action')).toHaveCount(0);
+  await page.locator('.connection-pill').click();
   await page.clock.fastForward(299_000);
   expect(await sends()).toBe(1);
   await page.clock.fastForward(2000);

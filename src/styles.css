@@ -57,6 +57,9 @@
 .player-strip strong{overflow-wrap:anywhere}
 .player-strip-right{flex-shrink:0}
 .game-panel .panel-tabs,.game-panel .game-id-row{flex-shrink:0}
+.connection-pill.mesh-call-to-action,.mobile-nav button.mesh-call-to-action{color:var(--accent-bright);background:#3692e724;box-shadow:inset 0 0 0 1px var(--accent),0 0 12px #3692e740;animation:mesh-invite 2s ease-in-out 3}
+.connection-pill.mesh-call-to-action:hover,.mobile-nav button.mesh-call-to-action:hover{background:#3692e738}
+@keyframes mesh-invite{50%{box-shadow:inset 0 0 0 1px var(--accent),0 0 20px #3692e780}}
 
 @media(min-width:901px) and (max-width:1150px){
   .game-layout{grid-template-columns:var(--sidebar) minmax(0,1fr) var(--panel)}

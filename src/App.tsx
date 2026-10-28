@@ -56,9 +56,11 @@ function feedResultReason(reason: GameStatus) {
 function App() {
   const mesh = useMeshChess();
   const { state } = mesh;
+  const demoConnected = mesh.transport.kind === 'demo' && mesh.transport.status === 'connected';
   const pausedPackets = state.outbox.filter(isRadioDeliveryPaused).length;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>('games');
+  const meshCallToAction = demoConnected && view !== 'network' ? 'mesh-call-to-action' : '';
   const [sideTab, setSideTab] = useState<SideTab>('moves');
   const [orientation, setOrientation] = useState<Color>('w');
   const [reviewPly, setReviewPly] = useState<number | null>(null);
@@ -210,7 +212,7 @@ function App() {
         <button className={view === 'lobby' ? 'active' : ''} onClick={() => setView('lobby')}><Users size={17} />Lobby{activeChallenges.length > 0 && <b>{activeChallenges.length}</b>}</button>
       </nav>
       <div className="header-actions">
-        <button className={`connection-pill ${mesh.transport.status}`} aria-label={`Connection settings: ${mesh.transport.detail}`} onClick={() => setView('network')}><span className="status-dot" />{mesh.transport.status === 'connected' ? mesh.transport.kind === 'demo' ? 'Local demo' : 'Radio online' : mesh.transport.status === 'connecting' ? 'Connecting' : mesh.transport.status === 'error' ? 'Connection error' : 'Off-grid'}<ChevronDown size={14} /></button>
+        <button className={`connection-pill ${mesh.transport.status} ${meshCallToAction}`} aria-label={`Connection settings: ${mesh.transport.detail}${demoConnected ? '. Connect a MeshCore radio to play over the mesh' : ''}`} title={demoConnected ? 'Local demo only. Connect a MeshCore radio to play over the mesh.' : mesh.transport.detail} onClick={() => setView('network')}><span className="status-dot" />{mesh.transport.status === 'connected' ? mesh.transport.kind === 'demo' ? 'Connect radio' : 'Radio online' : mesh.transport.status === 'connecting' ? 'Connecting' : mesh.transport.status === 'error' ? 'Connection error' : 'Off-grid'}<ChevronDown size={14} /></button>
         <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Settings"><Settings size={20} /></button>
         <button className="avatar" onClick={() => setSettingsOpen(true)} aria-label="Your profile">{state.profile.name.slice(0, 1).toUpperCase()}</button>
       </div>
@@ -330,7 +332,7 @@ function App() {
       <section className="surface radio-log"><div className="section-heading"><h2>Connection activity</h2><span>{mesh.logs.length} events</span></div>{mesh.logs.length ? [...mesh.logs].reverse().map((log) => <div key={log.id}><time>{new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><span>{log.text}</span></div>) : <p className="muted-copy">Connection and packet activity will appear here.</p>}</section>
     </main>}
 
-    <nav className="mobile-nav" aria-label="Mobile navigation"><button className={view === 'games' ? 'active' : ''} aria-current={view === 'games' ? 'page' : undefined} onClick={showGames}><Swords size={20} />Games{turnCount > 0 && <b aria-label={`${turnCount} games need your move`}>{turnCount}</b>}</button><button className={view === 'lobby' ? 'active' : ''} aria-current={view === 'lobby' ? 'page' : undefined} onClick={() => setView('lobby')}><Users size={20} />Lobby{activeChallenges.length > 0 && <b>{activeChallenges.length}</b>}</button><button className="mobile-create" onClick={() => setNewGameOpen(true)}><Plus size={22} />New</button><button className={view === 'network' ? 'active' : ''} aria-current={view === 'network' ? 'page' : undefined} onClick={() => setView('network')}><Radio size={20} />Mesh</button></nav>
+    <nav className="mobile-nav" aria-label="Mobile navigation"><button className={view === 'games' ? 'active' : ''} aria-current={view === 'games' ? 'page' : undefined} onClick={showGames}><Swords size={20} />Games{turnCount > 0 && <b aria-label={`${turnCount} games need your move`}>{turnCount}</b>}</button><button className={view === 'lobby' ? 'active' : ''} aria-current={view === 'lobby' ? 'page' : undefined} onClick={() => setView('lobby')}><Users size={20} />Lobby{activeChallenges.length > 0 && <b>{activeChallenges.length}</b>}</button><button className="mobile-create" onClick={() => setNewGameOpen(true)}><Plus size={22} />New</button><button className={`${view === 'network' ? 'active' : ''} ${meshCallToAction}`} title={demoConnected ? 'Connect a MeshCore radio to leave local demo mode' : 'Mesh connection'} aria-current={view === 'network' ? 'page' : undefined} onClick={() => setView('network')}><Radio size={20} />Mesh</button></nav>
 
     {newGameOpen && <Modal title="Create a new game" onClose={() => setNewGameOpen(false)}><div className="modal-intro"><span>♞</span><p>Post an open challenge to <strong>#chess</strong>. Your game begins when another player accepts.</p></div><label className="field-label">PLAY AS</label><div className="color-options">{(['w', 'random', 'b'] as const).map((color) => <button key={color} className={newColor === color ? 'selected' : ''} onClick={() => setNewColor(color)}><span>{color === 'w' ? '♔' : color === 'b' ? '♚' : '⚄'}</span>{color === 'w' ? 'White' : color === 'b' ? 'Black' : 'Random'}{newColor === color && <Check size={15} />}</button>)}</div><div className="async-explainer"><Clock3 size={19} /><div><strong>Asynchronous · no clock</strong><p>Moves are queued until your mesh connection is available. Both players can take as long as they like.</p></div></div><button className="primary-button modal-primary" onClick={() => { mesh.createChallenge(newColor); setNewGameOpen(false); setView('lobby'); notify('Challenge posted to the mesh'); }}><Radio size={18} />Post challenge to mesh</button></Modal>}
 

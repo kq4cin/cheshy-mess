@@ -64,7 +64,7 @@ Yes. Your games, chats, and profile save automatically in your browser.
 You do **not** need this to play. To play with real people nearby — with **no internet at all** — you need a **MeshCore companion radio** (a small LoRa radio device).
 
 1. Use **Chrome** or **Edge** on a computer or Android phone.
-2. Open the connection menu in the top bar and choose **USB Serial** or **Bluetooth LE**, then pick your radio.
+2. Click the highlighted **Connect radio** button in the top bar (or **Mesh** in the bottom navigation), then choose **USB Serial** or **Bluetooth LE** and pick your radio. The highlight appears in local demo mode and clears when you open Mesh or connect a radio.
 3. The game automatically sets up a public channel on your radio called **#chess**. Other players on that channel show up under **Heard on the mesh**.
 
 Bluetooth reconnects reuse your last selected radio; supported browsers can also restore that selection after a reload. Use **Choose another Bluetooth radio** in Mesh to switch devices. Like Mesh Wars, the app uses the standard Web Bluetooth connection flow and does not request or store a BLE PIN. Android or radio firmware may still require pairing; the app cannot bypass that prompt.
